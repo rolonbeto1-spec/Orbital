@@ -1,0 +1,473 @@
+// Metta — multi-tenant data model.
+//
+// TENANCY RULE (the most important rule in this file):
+//   Every row that describes a person's money carries an explicit `userId`
+//   foreign key to User. There is no "global" financial data and no implicit
+//   owner. Query scoping is enforced in code (src/lib/security/*), and this
+//   schema makes the scoping possible and indexable.
+//
+// MONEY: amounts are Float dollars, matching Plaid's own representation and
+//   the historical Metta convention (positive = money out, negative = money
+//   in). All *aggregation* goes through src/lib/money.ts, which sums in
+//   integer cents so repeated addition cannot accumulate binary-float error.
+//   See SECURITY_REVIEW.md §"Money representation" for the rationale and the
+//   residual risk.
+//
+// PROVIDER: `sqlite` is the committed provider for local development and the
+//   test suite. scripts/vercel-build.js rewrites it to `postgresql` for
+//   deployment, where committed migrations under prisma/migrations are
+//   applied with `prisma migrate deploy`.
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Identity — managed by Better Auth (src/lib/auth.ts)
+// ---------------------------------------------------------------------------
+
+model User {
+  id            String   @id
+  name          String
+  email         String   @unique
+  emailVerified Boolean  @default(false)
+  image         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // --- Metta application fields (declared to Better Auth as additionalFields
+  // so the auth layer knows about them, but owned by this application) ---
+
+  // USER | ADMIN. Never read from the client; checked server-side only.
+  role String @default("USER")
+
+  // IANA timezone. Drives user-facing period boundaries (months, weeks,
+  // "today" for AI limits). Internal storage stays UTC. See src/lib/time.ts.
+  timezone String @default("UTC")
+
+  // Opaque, stable, non-PII identifier handed to Plaid as `client_user_id`.
+  // Deliberately NOT the email/name/phone (Plaid requirement §8).
+  plaidUserRef String @unique
+
+  // Consent + onboarding state.
+  termsAcceptedAt   DateTime?
+  privacyAcceptedAt DateTime?
+  bankConsentAt     DateTime?
+  onboardedAt       DateTime?
+
+  // Per-user AI ceiling override (null = use the global default).
+  aiDailyLimit Int?
+
+  // Set when a deletion is requested but still draining; a user with
+  // deletedAt set is denied by requireUser().
+  deletedAt DateTime?
+
+  sessions     Session[]
+  authAccounts AuthAccount[]
+
+  // Financial data — all cascade on user deletion (§37: deleting an account
+  // destroys the money data; nothing is silently retained).
+  items         Item[]
+  accounts      Account[]
+  transactions  Transaction[]
+  holdings      Holding[]
+  categories    Category[]
+  merchantRules MerchantRule[]
+  budgets       Budget[]
+  goals         Goal[]
+  properties    Property[]
+  folders       Folder[]
+  settings      Setting[]
+
+  auditEvents AuditEvent[]
+
+  @@index([deletedAt])
+  @@map("user")
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("session")
+}
+
+// Better Auth's credential/OAuth account table. Named AuthAccount so it does
+// not collide with the financial `Account` model; mapped in src/lib/auth.ts
+// via `account: { modelName: "AuthAccount" }`.
+model AuthAccount {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  issuer                String    @default("")
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  // Scrypt hash produced by Better Auth. Never leaves the server; excluded
+  // from every export and API response.
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+  @@map("auth_account")
+}
+
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+  @@index([expiresAt])
+  @@map("verification")
+}
+
+// Better Auth's own rate-limit store (storage: "database"). Distinct from
+// RateLimitCounter, which serves the application's endpoints.
+model BetterAuthRateLimit {
+  id          String @id @default(cuid())
+  key         String @unique
+  count       Int
+  lastRequest BigInt
+
+  @@map("better_auth_rate_limit")
+}
+
+// ---------------------------------------------------------------------------
+// Financial data — every model is tenant-scoped
+// ---------------------------------------------------------------------------
+
+/// A Plaid Item = one connection to one bank, owned by exactly one user.
+model Item {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  plaidItemId     String  @unique
+  institutionId   String?
+  institutionName String
+
+  // Plaid access token, encrypted at the application layer with AES-256-GCM
+  // (src/lib/security/crypto.ts). The plaintext token never exists in a
+  // column, a log line, an API response, or an AI prompt.
+  accessTokenCipher String
+  // Key generation used, so keys can be rotated without re-linking banks.
+  accessTokenKeyId  String
+
+  // transactionsSync cursor.
+  cursor String?
+
+  // connected | login_required | consent_expired | disconnected | revoked | error
+  status       String  @default("connected")
+  statusDetail String?
+
+  lastSyncedAt   DateTime?
+  lastSyncError  String?
+  // Set while a sync is in flight; guards against concurrent/duplicate syncs.
+  syncStartedAt  DateTime?
+  logoBackfillAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  accounts Account[]
+
+  @@index([userId])
+  @@index([userId, status])
+}
+
+model Account {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  plaidAccountId String @unique
+  itemId         String
+  item           Item   @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  name             String
+  officialName     String?
+  mask             String?
+  type             String
+  subtype          String?
+  currentBalance   Float   @default(0)
+  availableBalance Float?
+  isBusiness       Boolean @default(false)
+  currencyCode     String  @default("USD")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  transactions Transaction[]
+  holdings     Holding[]
+
+  @@index([userId])
+  @@index([itemId])
+  @@index([userId, isBusiness])
+}
+
+model Holding {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  symbol   String
+  name     String
+  quantity Float
+  price    Float
+  value    Float
+  kind     String   @default("stock")
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([accountId])
+}
+
+model Transaction {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  plaidTransactionId String  @unique
+  accountId          String
+  account            Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  /// Plaid convention: positive = money out (spending), negative = money in.
+  amount        Float
+  date          DateTime
+  name          String
+  merchantName  String?
+  categoryId    String?
+  category      Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  plaidCategory String?
+  logoUrl       String?
+  pending       Boolean   @default(false)
+  currencyCode  String    @default("USD")
+  notes         String?
+
+  owedBack         Boolean @default(false)
+  reimbursedAmount Float   @default(0)
+
+  folderId String?
+  folder   Folder? @relation(fields: [folderId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([userId, date])
+  @@index([userId, categoryId])
+  @@index([userId, accountId])
+  @@index([userId, folderId])
+  @@index([userId, pending])
+}
+
+model Folder {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name      String
+  createdAt DateTime @default(now())
+
+  transactions Transaction[]
+
+  // Folder names are unique *per user*, never globally.
+  @@unique([userId, name])
+  @@index([userId])
+}
+
+/// Categories are per-user copies of the canonical catalog
+/// (src/lib/categories.ts), seeded when the account is created. Per-user
+/// rather than global so that a user's `inBudget` override, budgets and
+/// merchant rules cannot collide with or leak to another tenant.
+model Category {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name     String
+  icon     String
+  color    String
+  group    String   @default("expense")
+  inBudget Boolean?
+
+  transactions  Transaction[]
+  budget        Budget?
+  merchantRules MerchantRule[]
+
+  @@unique([userId, name])
+  @@index([userId])
+}
+
+model MerchantRule {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  match      String
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  minAmount  Float?
+  maxAmount  Float?
+  /// learned | builtin | ai — "learned" (the user's own correction) always wins.
+  source     String   @default("learned")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // One rule per (user, merchant match, amount band). Prevents the duplicate
+  // rules that concurrent syncs would otherwise create (§48).
+  @@unique([userId, match, minAmount, maxAmount])
+  @@index([userId, match])
+}
+
+model Budget {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  categoryId String   @unique
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  amount     Float
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model Property {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name       String
+  rentIncome Float   @default(0)
+  mortgage   Float   @default(0)
+  utilities  Float   @default(0)
+  hoa        Float   @default(0)
+  sweatIn    Float   @default(0)
+  sweatOut   Float   @default(0)
+  notes      String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model Goal {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name          String
+  targetAmount  Float
+  currentAmount Float     @default(0)
+  targetDate    DateTime?
+  icon          String    @default("target")
+  color         String    @default("#6366f1")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+/// Per-user key/value store: hive layout, alert prefs, AI counters, digest
+/// timers, question dismissals, cancel-plan cache. The primary key is
+/// (userId, key) — there are no global keys that two tenants could collide on.
+model Setting {
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  key    String
+  value  String
+
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@id([userId, key])
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Security / operations
+// ---------------------------------------------------------------------------
+
+/// Append-only security + account audit trail (§41). Deliberately contains NO
+/// financial content: no amounts, balances, merchant names or descriptions.
+/// userId is SetNull rather than Cascade so the trail of a deletion survives
+/// the deletion itself (documented in SECURITY_REVIEW.md).
+model AuditEvent {
+  id     String  @id @default(cuid())
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  /// Stable event name, e.g. "auth.login", "plaid.item.removed".
+  type String
+  /// Coarse outcome: success | failure | denied
+  outcome String @default("success")
+  /// Truncated IP and user agent for incident response.
+  ip        String?
+  userAgent String?
+  /// Small JSON blob of non-sensitive context (ids, counts, error codes).
+  /// Passed through the redaction utility before it is written.
+  meta String?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([type, createdAt])
+  @@index([createdAt])
+}
+
+/// Application rate-limit counters. Database-backed so the limit holds across
+/// serverless instances, which an in-process counter cannot do.
+model RateLimitCounter {
+  key       String   @id
+  count     Int      @default(0)
+  resetAt   DateTime
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([resetAt])
+}
+
+/// Plaid webhook de-duplication. A delivery whose fingerprint is already
+/// present is acknowledged and dropped, which makes processing idempotent and
+/// replay-safe (§10).
+model WebhookDelivery {
+  id          String   @id @default(cuid())
+  /// Fingerprint of (webhook_type, webhook_code, item_id, body digest).
+  fingerprint String   @unique
+  itemId      String?
+  receivedAt  DateTime @default(now())
+
+  @@index([receivedAt])
+}

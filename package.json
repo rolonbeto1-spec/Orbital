@@ -1,0 +1,49 @@
+{
+  "name": "metta-app",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "node scripts/vercel-build.js",
+    "build:next": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "seed": "tsx prisma/seed.ts",
+    "db:reset": "prisma migrate reset --force",
+    "db:postgres": "node scripts/switch-db.js postgres && prisma generate",
+    "db:sqlite": "node scripts/switch-db.js sqlite && prisma generate",
+    "db:deploy": "prisma db push && tsx prisma/seed.ts",
+    "postinstall": "prisma generate"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.116.0",
+    "@prisma/client": "^6.19.3",
+    "better-auth": "^1.7.2",
+    "date-fns": "^4.4.0",
+    "lucide-react": "^1.29.0",
+    "next": "16.3.0",
+    "plaid": "^45.0.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-plaid-link": "^5.0.0",
+    "recharts": "^3.10.1",
+    "server-only": "^0.0.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitest/coverage-v8": "^3.2.7",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.0",
+    "prisma": "^6.19.3",
+    "tailwindcss": "^4",
+    "tsx": "^4.23.9",
+    "typescript": "^5"
+  }
+}

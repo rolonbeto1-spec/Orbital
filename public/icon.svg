@@ -1,0 +1,13 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#818cf8"/>
+      <stop offset="1" stop-color="#6366f1"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#g)"/>
+  <!-- donut chart mark -->
+  <circle cx="256" cy="256" r="118" fill="none" stroke="#ffffff" stroke-width="52" stroke-opacity="0.35"/>
+  <path d="M256 138 a118 118 0 0 1 102 177 L256 256 Z" fill="#ffffff" fill-opacity="0.9"/>
+  <circle cx="256" cy="256" r="46" fill="url(#g)"/>
+</svg>

@@ -1,0 +1,448 @@
+@import "tailwindcss";
+
+/* ---- Design tokens ----
+   v3 palette: warm paper / warm graphite grounds, pine-green accent, and a
+   muted quartet for the hive branches (dusty blue, mauve, old gold, brick) —
+   money-app calm instead of arcade neon. */
+:root {
+  --bg: #f7f8f6;
+  --surface: #ffffff;
+  --surface-2: #edefea;
+  --border: #e0e3dd;
+  --text: #101614;
+  --text-muted: #5d6b64;
+  --text-faint: #93a09a;
+  --primary: #0f7a55;
+  --primary-soft: #e3f2ea;
+  --positive: #0f7a55;
+  --negative: #b4472f;
+  --shadow: 0 1px 3px rgba(16, 22, 20, 0.06), 0 1px 2px rgba(16, 22, 20, 0.04);
+  --shadow-lg: 0 10px 30px -12px rgba(16, 22, 20, 0.25);
+  /* hive branch colors (oklch hues from the visual handoff) */
+  --needs: oklch(0.58 0.12 210);
+  --wants: oklch(0.58 0.13 295);
+  --invest: oklch(0.58 0.12 168);
+  --rentals: oklch(0.58 0.13 355);
+  --hex: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0a0e0d;
+    --surface: #121817;
+    --surface-2: #1a2220;
+    --border: rgba(255, 255, 255, 0.09);
+    --text: #f2f5f3;
+    --text-muted: #9aa8a2;
+    --text-faint: #6c7a74;
+    --primary: #34d399;
+    --primary-soft: #16302a;
+    --positive: #34d399;
+    --negative: #f08a6d;
+    --shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+    --shadow-lg: 0 10px 30px -12px rgba(0, 0, 0, 0.6);
+    --needs: oklch(0.76 0.11 210);
+    --wants: oklch(0.76 0.12 295);
+    --invest: oklch(0.76 0.11 168);
+    --rentals: oklch(0.76 0.12 355);
+  }
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
+  --color-text: var(--text);
+  --color-text-muted: var(--text-muted);
+  --color-text-faint: var(--text-faint);
+  --color-primary: var(--primary);
+  --color-primary-soft: var(--primary-soft);
+  --color-positive: var(--positive);
+  --color-negative: var(--negative);
+  --font-sans: var(--font-geist-sans), system-ui, sans-serif;
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+html {
+  background: var(--bg);
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior-y: none;
+}
+
+/* Headings speak Sora; body speaks DM Sans. */
+h1,
+h2,
+h3,
+.font-heading {
+  font-family: var(--font-heading), var(--font-sans);
+  letter-spacing: -0.015em;
+}
+
+/* ---- Reusable primitives ---- */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  box-shadow: var(--shadow);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  font-weight: 600;
+  border-radius: 0.75rem;
+  transition:
+    opacity 0.15s ease,
+    transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1),
+    box-shadow 0.18s ease,
+    filter 0.18s ease;
+  cursor: pointer;
+}
+.btn:active {
+  transform: scale(0.96);
+}
+.btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.btn:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.btn-primary {
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklab, var(--primary) 82%, white),
+    var(--primary) 55%,
+    color-mix(in oklab, var(--primary) 88%, black)
+  );
+  color: #fff;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.25),
+    0 6px 16px -8px color-mix(in oklab, var(--primary) 70%, transparent);
+}
+@media (hover: hover) {
+  .btn:hover {
+    transform: translateY(-1px);
+  }
+  .btn:hover:active {
+    transform: translateY(0) scale(0.96);
+  }
+  .btn-primary:hover {
+    filter: brightness(1.06);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.25),
+      0 10px 24px -10px color-mix(in oklab, var(--primary) 85%, transparent);
+  }
+}
+.btn-ghost {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+input,
+select,
+textarea {
+  font-family: inherit;
+}
+
+/* hide number input spinners */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* thin scrollbars on desktop */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+
+/* ---- Honeycomb hive (home screen) ----
+   Professional, not arcade: flat tinted fills, hairline rims, neutral
+   shadows. Cells emerge from under their parent and slide to their spot. */
+.hivecell {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  filter: drop-shadow(0 2px 6px rgba(20, 22, 25, 0.1));
+  transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  animation: hexin 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: calc(var(--i, 0) * 50ms);
+}
+.hivecell:active {
+  transform: translate(-50%, -50%) scale(0.93);
+}
+/* The .inner is the rim (clipped hex); its ::before is the fill inset by
+   1.5px — a hairline honeycomb border that CSS borders can't do with
+   clip-path. */
+/* Apple-style cells: quiet frosted-glass bodies with a hairline seam.
+   Color communicates instead of decorating — it lives in the icon and the
+   activity ring, not smeared across the cell. */
+.hivecell .inner {
+  width: 100%;
+  height: 100%;
+  clip-path: var(--hex);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.5px;
+  text-align: center;
+  /* hairline shell, barely tinted */
+  background: color-mix(in srgb, var(--c) 22%, var(--border));
+  animation: hivebreathe 7s ease-in-out infinite;
+  animation-delay: calc(var(--i, 0) * 160ms);
+}
+.hivecell .inner::before {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  clip-path: var(--hex);
+  background:
+    /* top light, like glass catching the ceiling */
+    linear-gradient(180deg, rgba(255, 255, 255, 0.09), transparent 45%),
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--c) 3%, var(--surface)),
+      color-mix(in srgb, var(--c) 6%, var(--surface))
+    );
+}
+/* nectar level: a whisper of tint rising with the cell's weight */
+.hivecell .inner::after {
+  content: "";
+  position: absolute;
+  left: 1px;
+  right: 1px;
+  bottom: 1px;
+  height: calc((100% - 2px) * var(--fill, 0.4));
+  background: linear-gradient(
+    180deg,
+    transparent,
+    color-mix(in oklab, var(--c) 14%, transparent)
+  );
+  transition: height 0.9s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes hivebreathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.008); }
+}
+.hivecell .inner > * {
+  position: relative;
+  z-index: 1;
+}
+/* The hero is the same glass as everyone else — just more present: a
+   stronger primary seam, a touch more tint, and a deeper soft shadow. */
+.hivecell.center {
+  filter: drop-shadow(0 10px 24px color-mix(in srgb, var(--primary) 22%, rgba(20, 22, 25, 0.12)));
+}
+.hivecell.center .inner {
+  background: color-mix(in srgb, var(--primary) 45%, var(--border));
+}
+.hivecell.center .inner::before {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.1), transparent 45%),
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--primary) 6%, var(--surface)),
+      color-mix(in srgb, var(--primary) 12%, var(--surface))
+    );
+}
+.hivecell .trend {
+  position: absolute;
+  top: -6px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 4;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 1px 2px rgba(20, 22, 25, 0.1);
+  white-space: nowrap;
+}
+/* Emerge: start stacked under the parent (--fx/--fy point back at it),
+   slide out to the final spot. Center and money cells just scale in. */
+@keyframes hexin {
+  from {
+    opacity: 0;
+    transform: translate(calc(-50% + var(--fx, 0px)), calc(-50% + var(--fy, 0px))) scale(0.45);
+  }
+  60% {
+    opacity: 1;
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+/* Arrange (edit) mode: the familiar "you can move these now" jiggle */
+.hivecell.editable {
+  animation: none;
+}
+.hivecell.editable .inner {
+  animation: jiggle 1.5s ease-in-out infinite;
+}
+.hivecell.editable:nth-child(odd) .inner {
+  animation-delay: 0.35s;
+}
+@keyframes jiggle {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-1.3deg); }
+  75% { transform: rotate(1.3deg); }
+}
+/* dotted "strings" between cells; they fade in after their cells land, then
+   keep a slow pulse (scaled to each strand's own weight, so hierarchy holds) */
+.hivelink {
+  opacity: 0;
+  animation:
+    linkfade 0.5s ease-out forwards,
+    strandpulse 4.5s ease-in-out infinite;
+  animation-delay: calc(var(--i, 0) * 45ms + 0.2s), calc(var(--i, 0) * 45ms + 0.7s);
+}
+@keyframes linkfade {
+  to {
+    opacity: var(--o, 0.3);
+  }
+}
+@keyframes strandpulse {
+  0%,
+  100% {
+    opacity: calc(var(--o, 0.3) * 0.55);
+  }
+  50% {
+    opacity: var(--o, 0.3);
+  }
+}
+/* while a hex is being dragged: stick to the finger, float above the rest */
+.hivecell.dragging {
+  transition: none;
+  animation: none;
+  z-index: 20;
+  filter: drop-shadow(0 10px 22px rgba(15, 23, 42, 0.28));
+}
+.hivecell.dragging .inner {
+  filter: brightness(1.04);
+}
+@media (prefers-reduced-motion: reduce) {
+  .hivecell {
+    animation: none !important;
+  }
+  .hivelink {
+    animation: none !important;
+    opacity: var(--o, 0.3);
+  }
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-in {
+  animation: fadeInUp 0.35s ease both;
+}
+/* sheet content crossfade when hopping between overview / branch / item */
+.sheet-in {
+  animation: fadeInUp 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* ---- Motion & polish pass (v4): app-store-grade micro-interactions ---- */
+
+/* Every page glides in instead of popping (see src/app/template.tsx).
+   No fill-mode: once the animation ends the transform must fully release,
+   or position:fixed sheets anchor to this wrapper instead of the screen. */
+.page-enter {
+  animation: fadeInUp 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Staggered entrance: children cascade in one after another. "backwards"
+   keeps delayed items hidden until their turn, then releases entirely. */
+.stagger > * {
+  animation: fadeInUp 0.45s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+.stagger > *:nth-child(1) { animation-delay: 0.02s; }
+.stagger > *:nth-child(2) { animation-delay: 0.06s; }
+.stagger > *:nth-child(3) { animation-delay: 0.1s; }
+.stagger > *:nth-child(4) { animation-delay: 0.14s; }
+.stagger > *:nth-child(5) { animation-delay: 0.18s; }
+.stagger > *:nth-child(6) { animation-delay: 0.22s; }
+.stagger > *:nth-child(7) { animation-delay: 0.26s; }
+.stagger > *:nth-child(8) { animation-delay: 0.3s; }
+
+/* Shimmering skeleton for anything still loading. */
+.skeleton {
+  background: linear-gradient(
+    100deg,
+    var(--surface-2) 30%,
+    color-mix(in oklab, var(--surface-2) 55%, var(--surface)) 50%,
+    var(--surface-2) 70%
+  );
+  background-size: 300% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+@keyframes shimmer {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
+}
+
+/* Gentle idle float for hero elements. */
+.anim-float {
+  animation: floaty 3.6s ease-in-out infinite;
+}
+@keyframes floaty {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+
+/* Framed backdrop on larger screens so the phone shell looks intentional. */
+@media (min-width: 520px) {
+  body {
+    background:
+      radial-gradient(
+        1100px 700px at 50% -8%,
+        color-mix(in oklab, var(--primary) 7%, var(--bg)),
+        var(--bg)
+      );
+  }
+}
+
+/* Respect reduced-motion everywhere the polish pass animates. */
+@media (prefers-reduced-motion: reduce) {
+  .page-enter,
+  .stagger > *,
+  .anim-float,
+  .skeleton {
+    animation: none !important;
+  }
+}
