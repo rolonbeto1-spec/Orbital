@@ -19,14 +19,27 @@
  * SECURITY_REVIEW.md records this as an accepted, documented limitation.
  */
 
-/** Convert dollars to integer cents, rounding half away from zero. */
+/**
+ * Convert dollars to integer cents, rounding half away from zero.
+ *
+ * Two corrections over the naive `Math.round(dollars * 100)`:
+ *
+ * 1. SIGN SYMMETRY. `Math.round(-0.5)` is -0 in JavaScript, because Math.round
+ *    breaks ties toward +Infinity. That would round a $0.005 debit and a
+ *    $0.005 credit differently. We round the magnitude and reapply the sign.
+ *
+ * 2. REPRESENTATION ERROR. A value like 1.005 is stored as
+ *    1.00499999999999989, so `1.005 * 100` is 100.49999999999999 and rounds
+ *    DOWN to 100 — a cent lost on a value that a person typed as $1.005.
+ *    Normalising the scaled value to six decimal places first absorbs the
+ *    representation error (100.49999999999999 -> 100.5) without affecting any
+ *    value that was already exact.
+ */
 export function toCents(dollars: number): number {
   if (!Number.isFinite(dollars)) return 0;
-  // Math.round(-0.5) is -0 in JS, which rounds toward +infinity for negative
-  // halves. Round the magnitude and reapply the sign so credits and debits
-  // are treated symmetrically.
   const sign = dollars < 0 ? -1 : 1;
-  return sign * Math.round(Math.abs(dollars) * 100);
+  const scaled = Number((Math.abs(dollars) * 100).toFixed(6));
+  return sign * Math.round(scaled);
 }
 
 /** Convert integer cents back to dollars. */

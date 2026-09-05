@@ -14,6 +14,25 @@ import { z } from "zod";
  * secret; the only browser-visible configuration lives in src/lib/public-config.ts.
  */
 
+/**
+ * Treat a variable that is set but blank as absent.
+ *
+ * Hosting dashboards make it easy to create an empty variable, and
+ * `z.coerce.number()` turns "" into 0 — which for AI_DAILY_LIMIT would
+ * silently switch the AI off, and for a limit would silently mean "none".
+ * Stripping blanks here makes the schema defaults apply instead.
+ */
+function withoutBlanks(source: NodeJS.ProcessEnv): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (value === undefined) continue;
+    const trimmed = value.trim();
+    if (trimmed === "" || trimmed === "undefined" || trimmed === "null") continue;
+    out[key] = value;
+  }
+  return out;
+}
+
 const isProd = process.env.NODE_ENV === "production";
 const isTest = process.env.NODE_ENV === "test" || Boolean(process.env.VITEST);
 
@@ -100,7 +119,7 @@ const schema = z.object({
   VERCEL_ENV: z.enum(["production", "preview", "development"]).optional(),
 });
 
-const parsed = schema.safeParse(process.env);
+const parsed = schema.safeParse(withoutBlanks(process.env));
 
 if (!parsed.success) {
   // Print only the field names and messages — never the values, which would

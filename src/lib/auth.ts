@@ -300,6 +300,9 @@ export const auth = betterAuth({
   },
 
   advanced: {
+    // Pinned explicitly so the proxy's optimistic cookie check and the auth
+    // server cannot disagree about the cookie name.
+    cookiePrefix: "metta",
     // HTTPS-only cookies in production (§5, §27).
     useSecureCookies: isProduction,
     defaultCookieAttributes: {

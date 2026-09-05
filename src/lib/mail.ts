@@ -54,8 +54,11 @@ export async function sendMail({ to, subject, text }: SendMailInput): Promise<vo
       // somehow got here, fail loudly rather than pretend mail was sent.
       throw new MailError("Email provider is not configured.");
     }
-    // Development only. The body may contain a verification link, which is a
-    // credential — so this deliberately only ever runs outside production.
+    // Development only, and guarded by the isProduction check above. The body
+    // contains a verification or reset link, which is a credential — that is
+    // exactly why this cannot use the redacting logger (it would scrub the
+    // link a developer needs) and exactly why it never runs in production.
+    // eslint-disable-next-line no-console -- dev-only, unreachable in production
     console.log(`\n--- dev email ---\nto: ${to}\nsubject: ${safeSubject}\n\n${text}\n---\n`);
     return;
   }

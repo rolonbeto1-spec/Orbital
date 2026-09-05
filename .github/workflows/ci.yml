@@ -1,0 +1,95 @@
+name: CI
+
+# Security gate (§64). Every one of these jobs must pass before a change can
+# reach production. A failing security-critical test blocks the merge — that
+# is the point, and the branch protection rule referenced in
+# PRODUCTION_LAUNCH_CHECKLIST.md is what makes it binding.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Test-only values. Real secrets are never needed to run the suite, which is
+  # deliberate: CI must not hold production credentials (§43, §46).
+  DATABASE_URL: file:./test.db
+  BETTER_AUTH_SECRET: ci-only-secret-not-used-anywhere-real-0123456789
+  BETTER_AUTH_URL: http://localhost:3000
+  APP_URL: http://localhost:3000
+  ENCRYPTION_KEY_ACTIVE: v1
+  PUBLIC_SIGNUP_ENABLED: "false"
+
+jobs:
+  verify:
+    name: Lint, typecheck, tests, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # `npm ci` installs strictly from the committed lockfile — reproducible,
+      # and it will fail rather than silently resolve a different tree (§43).
+      - name: Install (locked)
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Prepare test database
+        run: npx prisma db push --skip-generate --accept-data-loss
+
+      # Runs the whole suite, including the release-blocking tenant-isolation
+      # tests. A failure here stops the merge.
+      - name: Tests
+        run: npm test
+
+      - name: Build
+        run: npm run build:next
+
+  security:
+    name: Security scans
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history, so the secret scan can look at what was committed
+          # before, not just the current tree.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install (locked)
+        run: npm ci
+
+      - name: Secret scan
+        run: node scripts/scan-secrets.js
+
+      # Advisory rather than blocking at "moderate": a transitive advisory in a
+      # build-time dependency should be reviewed, not used to block an urgent
+      # fix. High and critical DO block.
+      - name: Dependency audit (high and above blocks)
+        run: npm audit --audit-level=high
+
+      - name: Dependency audit (full report, advisory)
+        run: npm audit || true
