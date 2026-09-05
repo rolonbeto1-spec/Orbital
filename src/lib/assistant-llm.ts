@@ -1,4 +1,4 @@
-import Anthropic from "@anthropic-ai/sdk";
+import "server-only";
 import { prisma } from "@/lib/prisma";
 import {
   getNetWorth,
@@ -6,19 +6,45 @@ import {
   getSpendingByCategory,
   getBudgetsWithSpend,
   getReimbursements,
-  currentMonthRange,
 } from "@/lib/queries";
+import { currentMonthRange, monthRangeInZone, partsInZone } from "@/lib/time";
 import { NEEDS_CATEGORIES, WANTS_CATEGORIES } from "@/lib/buckets";
 import { categoryInBudget } from "@/lib/budget";
 import { detectRecurring } from "@/lib/recurring";
+import { roundMoney, subtractMoney } from "@/lib/money";
 import type { AssistantAnswer } from "@/lib/assistant";
+import type { AuthedUser } from "@/lib/security/session";
+import { askClaude, claimAiCall, untrusted, untrustedBlock } from "@/lib/ai/guard";
+import { env } from "@/lib/env";
 
-// The natural-language upgrade for the assistant. Activated by setting
-// ANTHROPIC_API_KEY in .env — without a key the app keeps using the built-in
-// rule engine in assistant.ts, so this file is entirely optional at runtime.
+/**
+ * The natural-language assistant (§30, §31).
+ *
+ * Three properties this file is responsible for:
+ *
+ *  1. The snapshot is built from ONE user's data, by an explicit projection.
+ *     Every query below is scoped by userId, and every field sent is named
+ *     here by hand. No Prisma row is spread into the payload, so a column
+ *     added to the schema later — an encrypted token, an internal flag —
+ *     cannot start being sent to Anthropic by accident (§30).
+ *
+ *  2. Attacker-controlled strings inside that snapshot (merchant names,
+ *     transaction descriptions, folder names, the user's own notes) are
+ *     wrapped as untrusted data and length-bounded, and the standing system
+ *     preamble in ai/guard.ts tells the model they are data (§31).
+ *
+ *  3. The model has no tools. It cannot query the database, call an API, or
+ *     reach another tenant's data — so even a fully successful prompt
+ *     injection can only make it say something wrong, which is the
+ *     structural containment the delimiters alone would not give (§31).
+ *
+ * What is deliberately NOT in the snapshot: Plaid tokens, access credentials,
+ * session identifiers, API keys, database identifiers, email addresses, the
+ * user's name, or any account or routing number (§30).
+ */
 
 export function llmConfigured(): boolean {
-  return !!process.env.ANTHROPIC_API_KEY;
+  return Boolean(env.ANTHROPIC_API_KEY);
 }
 
 export interface ChatTurn {
@@ -26,71 +52,89 @@ export interface ChatTurn {
   text: string;
 }
 
-// Chat model — owner's choice via the AI_MODEL env var. Defaults to Haiku,
-// which answers snapshot-grounded questions well at a fraction of the cost.
-const MODEL = process.env.AI_MODEL || "claude-haiku-4-5";
+/** How much history to carry. Bounded so a long chat cannot grow the bill. */
+const MAX_HISTORY_TURNS = 8;
+const MAX_HISTORY_CHARS = 1000;
 
-// Daily ceiling on AI calls, as a runaway backstop rather than a leash.
-// Owner-tunable via AI_DAILY_LIMIT; set it to 0 for no limit at all.
-// Past the ceiling the caller's fallback answers via the rule engine.
-const DAILY_CALL_LIMIT = (() => {
-  const raw = process.env.AI_DAILY_LIMIT;
-  if (raw == null || raw.trim() === "") return 1000;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) ? n : 1000;
-})();
-
-export async function spendOneDailyCall(): Promise<void> {
-  if (DAILY_CALL_LIMIT <= 0) return; // owner turned the limit off
-  const key = `aiCalls:${new Date().toISOString().slice(0, 10)}`;
-  const row = await prisma.setting.findUnique({ where: { key } });
-  const used = row ? parseInt(row.value, 10) || 0 : 0;
-  if (used >= DAILY_CALL_LIMIT) {
-    throw new Error(`Daily AI budget reached (${DAILY_CALL_LIMIT} questions)`);
-  }
-  await prisma.setting.upsert({
-    where: { key },
-    update: { value: String(used + 1) },
-    create: { key, value: "1" },
-  });
-}
-
-// Everything the model needs to answer, in one compact snapshot. Sent fresh on
-// every question so answers always reflect the current database.
-async function buildContext(): Promise<string> {
+/**
+ * Build the financial snapshot for one user.
+ *
+ * Note the shape of the identifiers: the model receives category *names* and
+ * merchant *names*, never database ids. It has nothing to echo back that
+ * could address a row, which is part of why the structured-action path
+ * (assistant-actions.ts) resolves everything by ownership-checked lookup
+ * rather than by trusting an id from the model (§32).
+ */
+async function buildContext(user: AuthedUser): Promise<string> {
   const now = new Date();
-  const { start: monthStart, end: monthEnd } = currentMonthRange();
-  const prevStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-  const prevEnd = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999);
+  const timeZone = user.timezone;
+
+  const { start: monthStart, end: monthEnd } = currentMonthRange(timeZone);
+  const { year, month } = partsInZone(now, timeZone);
+  const prevYear = month === 1 ? year - 1 : year;
+  const prevMonth = month === 1 ? 12 : month - 1;
+  const { start: prevStart, end: prevEnd } = monthRangeInZone(timeZone, prevYear, prevMonth);
+
   const recentStart = new Date(now);
   recentStart.setDate(recentStart.getDate() - 45);
 
-  const [netWorth, cashflow, spendNow, spendPrev, budgets, reimb, accounts, goals, properties, recent, holdings, recurring] =
-    await Promise.all([
-      getNetWorth(),
-      getCashflow(monthStart, monthEnd),
-      getSpendingByCategory(monthStart, monthEnd),
-      getSpendingByCategory(prevStart, prevEnd),
-      getBudgetsWithSpend(),
-      getReimbursements(),
-      prisma.account.findMany({ include: { item: true } }),
-      prisma.goal.findMany(),
-      prisma.property.findMany(),
-      prisma.transaction.findMany({
-        where: { date: { gte: recentStart } },
-        include: { category: true },
-        orderBy: { date: "desc" },
-        take: 60,
-      }),
-      prisma.holding.findMany({ include: { account: { select: { name: true } } } }),
-      detectRecurring(),
-    ]);
+  const [
+    netWorth, cashflow, spendNow, spendPrev, budgets, reimbursements,
+    accounts, goals, properties, recent, holdings, recurring,
+  ] = await Promise.all([
+    getNetWorth(user.id),
+    getCashflow(user.id, monthStart, monthEnd),
+    getSpendingByCategory(user.id, monthStart, monthEnd),
+    getSpendingByCategory(user.id, prevStart, prevEnd),
+    getBudgetsWithSpend(user.id, timeZone),
+    getReimbursements(user.id),
+    prisma.account.findMany({
+      where: { userId: user.id },
+      select: {
+        name: true, type: true, subtype: true, currentBalance: true,
+        item: { select: { institutionName: true } },
+      },
+    }),
+    prisma.goal.findMany({
+      where: { userId: user.id },
+      select: { name: true, targetAmount: true, currentAmount: true, targetDate: true },
+    }),
+    prisma.property.findMany({
+      where: { userId: user.id },
+      select: {
+        name: true, rentIncome: true, mortgage: true, utilities: true,
+        hoa: true, sweatIn: true, sweatOut: true,
+      },
+    }),
+    prisma.transaction.findMany({
+      where: { userId: user.id, date: { gte: recentStart } },
+      select: {
+        date: true, name: true, merchantName: true, amount: true, owedBack: true,
+        category: { select: { name: true } },
+      },
+      orderBy: { date: "desc" },
+      take: 60,
+    }),
+    prisma.holding.findMany({
+      where: { userId: user.id },
+      select: {
+        symbol: true, name: true, kind: true, quantity: true, value: true,
+        account: { select: { name: true } },
+      },
+      take: 200,
+    }),
+    detectRecurring(user.id),
+  ]);
 
-  const d = (v: number) => Math.round(v * 100) / 100;
-  const day = (dt: Date) => dt.toISOString().slice(0, 10);
+  const d = (value: number) => roundMoney(value);
+  const day = (date: Date) => date.toISOString().slice(0, 10);
+  // Merchant and account names come from banks and from the user; they are
+  // the injection surface, so every one is scrubbed and bounded.
+  const text = (value: string, max = 80) => untrusted(value, max);
 
-  const ctx = {
+  const context = {
     today: day(now),
+    timezone: timeZone,
     net_worth: {
       assets: d(netWorth.assets),
       debt: d(netWorth.liabilities),
@@ -104,7 +148,10 @@ async function buildContext(): Promise<string> {
       spending: d(cashflow.spending),
       spending_by_category: spendNow.map((c) => ({ category: c.name, spent: d(c.total) })),
     },
-    last_month_spending_by_category: spendPrev.map((c) => ({ category: c.name, spent: d(c.total) })),
+    last_month_spending_by_category: spendPrev.map((c) => ({
+      category: c.name,
+      spent: d(c.total),
+    })),
     budgets: budgets.map((b) => ({
       category: b.category.name,
       limit: d(b.limit),
@@ -112,58 +159,61 @@ async function buildContext(): Promise<string> {
       in_my_budget: categoryInBudget(b.category),
     })),
     accounts: accounts.map((a) => ({
-      name: a.name,
-      bank: a.item.institutionName,
+      name: text(a.name, 60),
+      bank: text(a.item.institutionName, 60),
       type: a.type,
       subtype: a.subtype,
       balance: d(a.currentBalance ?? 0),
     })),
     goals: goals.map((g) => ({
-      name: g.name,
+      name: text(g.name, 60),
       target: d(g.targetAmount),
       saved: d(g.currentAmount),
       deadline: g.targetDate ? day(g.targetDate) : null,
     })),
     rental_properties: properties.map((p) => ({
-      name: p.name,
+      name: text(p.name, 60),
       rent_income: d(p.rentIncome),
       mortgage: d(p.mortgage),
       utilities: d(p.utilities),
       hoa: d(p.hoa),
-      monthly_net: d(p.rentIncome - p.mortgage - p.utilities - p.hoa),
+      monthly_net: d(
+        subtractMoney(p.rentIncome, p.mortgage + p.utilities + p.hoa),
+      ),
       sweat_equity_put_in: d(p.sweatIn),
       sweat_equity_gotten_out: d(p.sweatOut),
     })),
     investment_holdings: holdings.map((h) => ({
-      account: h.account.name,
-      symbol: h.symbol,
-      name: h.name,
+      account: text(h.account.name, 60),
+      symbol: text(h.symbol, 20),
+      name: text(h.name, 60),
       kind: h.kind,
       quantity: h.quantity,
       value: d(h.value),
     })),
     recurring_bills_and_subscriptions: recurring.map((r) => ({
-      merchant: r.merchant,
+      merchant: text(r.merchant),
       cadence: r.cadence,
       typical_amount: d(r.amount),
       monthly_cost: d(r.monthlyCost),
       next_expected: r.nextExpected.slice(0, 10),
     })),
-    money_owed_back_to_user: reimb.outstanding.map((t) => ({
-      merchant: t.name,
+    money_owed_back_to_user: reimbursements.outstanding.map((t) => ({
+      merchant: text(t.name),
       date: day(t.date),
       amount: d(t.amount),
       already_repaid: d(t.reimbursed),
     })),
     recent_transactions: recent.map((t) => ({
       date: day(t.date),
-      merchant: t.merchantName || t.name,
+      merchant: text(t.merchantName || t.name),
       amount: d(t.amount),
       category: t.category?.name ?? "Uncategorized",
       owed_back: t.owedBack || undefined,
     })),
   };
-  return JSON.stringify(ctx);
+
+  return JSON.stringify(context);
 }
 
 const SYSTEM = `You are Metta's built-in money assistant, powered by Anthropic's Claude. You answer questions about the user's own money using ONLY the JSON snapshot provided — never invent numbers.
@@ -175,6 +225,8 @@ What the app can DO (never claim these are impossible or "up to a data team" —
 - "Save this <merchant> charge to my <name> folder" and "remind me at half my budget" are real commands this chat executes.
 - Telling this chat "the <merchant> charge is <category>" (e.g. "the Chevron charge is Transportation") re-files that merchant's charges and permanently teaches the rule.
 When the user complains about sorting or asks you to fix categories, tell them to say "sort my transactions" right here in the chat — that phrase triggers the sorter.
+
+What the app CANNOT do, ever: move money. Metta's bank connection is read-only. It cannot transfer, pay bills, send money, or make purchases. If asked to move money, say plainly that Metta can only look, never touch.
 
 Rules of the app you must respect:
 - Transaction amounts follow Plaid's convention: positive = money spent, negative = money received.
@@ -188,38 +240,42 @@ Style:
 - If the data genuinely can't answer the question, say so briefly and suggest what you can answer.
 - This is the user's own financial data shown back to them in their own app.`;
 
-export async function askLLM(question: string, history: ChatTurn[] = []): Promise<AssistantAnswer> {
-  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, timeout: 30_000, maxRetries: 1 });
-  const context = await buildContext();
+/**
+ * Ask the model a question, grounded in the signed-in user's snapshot.
+ *
+ * The AI budget is claimed BEFORE the snapshot is built and before the
+ * request is sent, so a user who is out of allowance never causes a paid call
+ * and never has their financial data assembled for one (§33).
+ */
+export async function askLLM(
+  user: AuthedUser,
+  question: string,
+  history: ChatTurn[] = [],
+): Promise<AssistantAnswer> {
+  // Throws AiBudgetExceeded, which the route turns into a graceful fallback.
+  await claimAiCall(user);
 
-  const messages: Anthropic.MessageParam[] = [
-    // Recent conversation so follow-ups like "and last week?" keep their meaning.
-    ...history.slice(-8).map(
-      (t): Anthropic.MessageParam => ({
-        role: t.role === "user" ? "user" : "assistant",
-        content: t.text,
-      }),
-    ),
-    {
-      role: "user",
-      content: `<financial_snapshot>${context}</financial_snapshot>\n\nQuestion: ${question}`,
-    },
-  ];
+  const context = await buildContext(user);
 
-  await spendOneDailyCall();
+  // Conversation history is the user's own prior text: untrusted, bounded,
+  // and folded into the single user message rather than replayed as
+  // assistant turns the model might treat as its own instructions.
+  const priorTurns = history
+    .slice(-MAX_HISTORY_TURNS)
+    .map((turn) => `${turn.role === "user" ? "User" : "Metta"}: ${untrusted(turn.text, 400)}`)
+    .join("\n")
+    .slice(-MAX_HISTORY_CHARS);
 
-  const response = await client.messages.create({
-    model: MODEL,
-    max_tokens: 600,
-    system: SYSTEM,
-    messages,
-  });
-
-  const answer = response.content
-    .filter((b): b is Anthropic.TextBlock => b.type === "text")
-    .map((b) => b.text)
-    .join("")
-    .trim();
+  const answer = (
+    await askClaude({
+      system: SYSTEM,
+      userContent:
+        `<financial_snapshot>${context}</financial_snapshot>\n\n` +
+        (priorTurns ? `Recent conversation:\n${untrustedBlock(priorTurns)}\n\n` : "") +
+        `Question: ${untrustedBlock(untrusted(question, 2000))}`,
+      maxTokens: 600,
+    })
+  ).trim();
 
   if (!answer) throw new Error("Empty answer from model");
   return { answer };

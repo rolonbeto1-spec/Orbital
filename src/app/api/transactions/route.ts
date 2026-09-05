@@ -1,61 +1,95 @@
-import { NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@/generated/prisma";
-import { monthRange } from "@/lib/queries";
+import { route, safeJson } from "@/lib/security/api";
+import { prisma } from "@/lib/prisma";
+import { ownedBy } from "@/lib/security/ownership";
+import { transactionListQuery } from "@/lib/validation";
+import { parseMonthKey, trailingDays } from "@/lib/time";
 
-export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
-  const month = searchParams.get("month"); // YYYY-MM
-  const categoryId = searchParams.get("category");
-  const accountId = searchParams.get("account");
-  const bankId = searchParams.get("bank"); // an Item id — all accounts at one institution
-  const search = searchParams.get("search");
-  const limit = Math.min(Number(searchParams.get("limit") ?? 50), 200);
-  const offset = Number(searchParams.get("offset") ?? 0);
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-  const where: Prisma.TransactionWhereInput = {};
+/**
+ * The Activity list.
+ *
+ * Tenancy: `ownedBy(user.id)` is the first thing in the WHERE clause, and the
+ * filters the client supplies (account, bank, category, folder) are ANDed
+ * with it. A client passing another user's account id gets an empty list, not
+ * an error and not somebody else's data — the scope makes it unmatchable
+ * rather than needing a separate check (§7).
+ *
+ * Resource limits (§51, §52): `limit` is capped at 200 by the schema, search
+ * text at 80 characters, and the date window at three years. There is no way
+ * to ask this endpoint for an unbounded scan.
+ */
+export const GET = route(
+  { auth: "user", limits: ["read"], query: transactionListQuery },
+  async (ctx) => {
+    const { month, days, category, account, bank, folder, search, limit, offset } = ctx.query;
 
-  if (month) {
-    const [y, m] = month.split("-").map(Number);
-    if (y && m) {
-      const { start, end } = monthRange(y, m - 1);
-      where.date = { gte: start, lt: end };
+    const where: Prisma.TransactionWhereInput = { ...ownedBy(ctx.user.id) };
+
+    // Period boundaries are computed in the user's own timezone (§50).
+    if (month) {
+      const range = parseMonthKey(ctx.user.timezone, month);
+      if (range) where.date = { gte: range.start, lt: range.end };
+    } else if (days) {
+      const range = trailingDays(ctx.user.timezone, days);
+      where.date = { gte: range.start };
     }
-  }
-  const days = Number(searchParams.get("days"));
-  if (!month && days > 0) {
-    const start = new Date();
-    start.setDate(start.getDate() - days);
-    where.date = { gte: start };
-  }
-  if (categoryId) where.categoryId = categoryId;
-  if (accountId) where.accountId = accountId;
-  else if (bankId) where.account = { itemId: bankId };
-  if (search) {
-    const or: Prisma.TransactionWhereInput[] = [
-      { name: { contains: search } },
-      { merchantName: { contains: search } },
-      { notes: { contains: search } },
-    ];
-    // "44.74" or "$44.74" finds the purchase by amount too.
-    const asAmount = parseFloat(search.replace(/[$,]/g, ""));
-    if (!isNaN(asAmount) && asAmount > 0) {
-      or.push({ amount: { gte: asAmount - 0.005, lte: asAmount + 0.005 } });
-      or.push({ amount: { gte: -asAmount - 0.005, lte: -asAmount + 0.005 } });
+
+    if (category) where.categoryId = category;
+    if (folder) where.folderId = folder;
+    if (account) where.accountId = account;
+    else if (bank) where.account = { itemId: bank, userId: ctx.user.id };
+
+    if (search) {
+      // Prisma's `contains` is a parameterised LIKE — the value is never
+      // interpolated into SQL, and it is not compiled as a regex, so there is
+      // no injection and no ReDoS surface (§15, §52).
+      const or: Prisma.TransactionWhereInput[] = [
+        { name: { contains: search } },
+        { merchantName: { contains: search } },
+        { notes: { contains: search } },
+      ];
+      // "44.74" or "$44.74" also finds the purchase by amount.
+      const asAmount = Number.parseFloat(search.replace(/[$,]/g, ""));
+      if (Number.isFinite(asAmount) && asAmount > 0) {
+        or.push({ amount: { gte: asAmount - 0.005, lte: asAmount + 0.005 } });
+        or.push({ amount: { gte: -asAmount - 0.005, lte: -asAmount + 0.005 } });
+      }
+      where.OR = or;
     }
-    where.OR = or;
-  }
 
-  const [transactions, total] = await Promise.all([
-    prisma.transaction.findMany({
-      where,
-      include: { category: true, account: { select: { name: true, mask: true } } },
-      orderBy: { date: "desc" },
-      take: limit,
-      skip: offset,
-    }),
-    prisma.transaction.count({ where }),
-  ]);
+    const [transactions, total] = await Promise.all([
+      prisma.transaction.findMany({
+        where,
+        // Explicit select rather than a bare include: the browser gets exactly
+        // the fields the list renders and nothing that happens to be on the
+        // row (§59).
+        select: {
+          id: true,
+          amount: true,
+          date: true,
+          name: true,
+          merchantName: true,
+          categoryId: true,
+          logoUrl: true,
+          pending: true,
+          currencyCode: true,
+          notes: true,
+          owedBack: true,
+          reimbursedAmount: true,
+          folderId: true,
+          category: { select: { id: true, name: true, icon: true, color: true, group: true } },
+          account: { select: { name: true, mask: true } },
+        },
+        orderBy: { date: "desc" },
+        take: limit,
+        skip: offset,
+      }),
+      prisma.transaction.count({ where }),
+    ]);
 
-  return NextResponse.json({ transactions, total, limit, offset });
-}
+    return safeJson({ transactions, total, limit, offset });
+  },
+);

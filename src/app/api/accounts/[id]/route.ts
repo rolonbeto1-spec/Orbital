@@ -1,24 +1,35 @@
-import { NextResponse } from "next/server";
+import { route, safeJson } from "@/lib/security/api";
 import { prisma } from "@/lib/prisma";
+import { requireOwned } from "@/lib/security/ownership";
+import { accountUpdate } from "@/lib/validation";
 
-// Account settings — today: mark an account as a business account, which
-// gives it its own breakdown screen and keeps it out of personal budgets.
-export async function PATCH(
-  req: Request,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  const { id } = await params;
-  const body = await req.json();
-  if (!("isBusiness" in body)) {
-    return NextResponse.json({ error: "Nothing to update" }, { status: 400 });
-  }
-  try {
-    const updated = await prisma.account.update({
-      where: { id },
-      data: { isBusiness: Boolean(body.isBusiness) },
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+/**
+ * Toggle an account's Business flag, which routes it to the Business screen
+ * and out of the personal hive and budget.
+ *
+ * PATCH only, ownership enforced in the query (§7, §17).
+ */
+export const PATCH = route(
+  { auth: "user", limits: ["write"], body: accountUpdate },
+  async (ctx) => {
+    const id = ctx.params.id;
+    await requireOwned("account", id, ctx.user.id, { select: { id: true } });
+
+    await prisma.account.updateMany({
+      where: { id, userId: ctx.user.id },
+      data: { isBusiness: ctx.body.isBusiness },
     });
-    return NextResponse.json(updated);
-  } catch {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
-  }
-}
+
+    const account = await prisma.account.findFirst({
+      where: { id, userId: ctx.user.id },
+      select: {
+        id: true, name: true, mask: true, type: true, subtype: true,
+        currentBalance: true, availableBalance: true, isBusiness: true, currencyCode: true,
+      },
+    });
+    return safeJson(account);
+  },
+);

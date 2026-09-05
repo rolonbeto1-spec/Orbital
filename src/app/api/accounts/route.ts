@@ -1,16 +1,17 @@
-import { NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
-import { getNetWorth } from "@/lib/queries";
-import { plaidConfigured } from "@/lib/plaid";
+import { route, safeJson } from "@/lib/security/api";
+import { listItemsForUser } from "@/lib/plaid-items";
 
-export async function GET() {
-  const [accounts, netWorth, items] = await Promise.all([
-    prisma.account.findMany({ orderBy: { currentBalance: "desc" } }),
-    getNetWorth(),
-    prisma.item.findMany({
-      orderBy: { createdAt: "asc" },
-      include: { accounts: { orderBy: { currentBalance: "desc" } } },
-    }),
-  ]);
-  return NextResponse.json({ accounts, ...netWorth, items, plaidConfigured });
-}
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+/**
+ * The user's bank connections and accounts.
+ *
+ * listItemsForUser uses an explicit `select` that excludes
+ * `accessTokenCipher`, so the encrypted Plaid credential cannot reach the
+ * browser even by accident (§9).
+ */
+export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
+  const items = await listItemsForUser(ctx.user.id);
+  return safeJson({ items });
+});

@@ -1,28 +1,51 @@
-import { NextResponse } from "next/server";
+import { route, safeJson } from "@/lib/security/api";
 import { prisma } from "@/lib/prisma";
+import { weekRange } from "@/lib/time";
+import { sumBy, effectiveSpend, roundMoney } from "@/lib/money";
 
-// Your week in 20 seconds: last 7 days of personal money vs the 7 before.
-export async function GET() {
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+/**
+ * Your week in 20 seconds — this user's last 7 days vs the 7 before.
+ *
+ * The week boundary is the user's own midnight, so somebody in Auckland and
+ * somebody in Los Angeles each get their own seven days rather than sharing
+ * the server's (§50).
+ */
+export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
+  const { id: userId, timezone } = ctx.user;
   const now = new Date();
-  const weekStart = new Date(now);
-  weekStart.setDate(weekStart.getDate() - 7);
-  const prevStart = new Date(weekStart);
-  prevStart.setDate(prevStart.getDate() - 7);
+  const { start: weekStart } = weekRange(timezone, now);
+  const prevStart = new Date(weekStart.getTime() - 7 * 86_400_000);
 
   const txns = await prisma.transaction.findMany({
-    where: { date: { gte: prevStart, lte: now }, account: { isBusiness: false } },
-    include: { category: true },
+    where: {
+      userId,
+      date: { gte: prevStart, lte: now },
+      account: { isBusiness: false },
+    },
+    select: {
+      id: true, date: true, name: true, merchantName: true, amount: true,
+      owedBack: true, reimbursedAmount: true,
+      category: { select: { name: true, icon: true, color: true, group: true } },
+    },
+    take: 5000,
   });
 
   const week = txns.filter((t) => t.date >= weekStart);
   const prev = txns.filter((t) => t.date < weekStart);
 
   const spendOf = (list: typeof txns) =>
-    list
-      .filter((t) => t.amount > 0 && t.category?.group !== "transfer")
-      .reduce((s, t) => s + (t.owedBack ? Math.max(0, t.amount - t.reimbursedAmount) : t.amount), 0);
+    sumBy(
+      list.filter((t) => t.amount > 0 && t.category?.group !== "transfer"),
+      (t) => (t.owedBack ? effectiveSpend(t.amount, t.reimbursedAmount) : t.amount),
+    );
   const incomeOf = (list: typeof txns) =>
-    list.filter((t) => t.amount < 0 && t.category?.group !== "transfer").reduce((s, t) => s - t.amount, 0);
+    sumBy(
+      list.filter((t) => t.amount < 0 && t.category?.group !== "transfer"),
+      (t) => -t.amount,
+    );
 
   const spending = spendOf(week);
   const prevSpending = spendOf(prev);
@@ -37,13 +60,13 @@ export async function GET() {
   const topCategories = [...byCategory.entries()]
     .sort((a, b) => b[1] - a[1])
     .slice(0, 3)
-    .map(([name, total]) => ({ name, total: Math.round(total * 100) / 100 }));
+    .map(([name, total]) => ({ name, total: roundMoney(total) }));
 
   const biggest = week
     .filter((t) => t.amount > 0 && t.category?.group !== "transfer")
     .sort((a, b) => b.amount - a.amount)[0];
 
-  return NextResponse.json({
+  return safeJson({
     spending: Math.round(spending * 100) / 100,
     prevSpending: Math.round(prevSpending * 100) / 100,
     trendPct:
@@ -54,4 +77,4 @@ export async function GET() {
       ? { merchant: biggest.merchantName || biggest.name, amount: biggest.amount }
       : null,
   });
-}
+});

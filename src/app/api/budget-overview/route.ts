@@ -1,67 +1,68 @@
-import { NextResponse } from "next/server";
+import { route, safeJson } from "@/lib/security/api";
 import { prisma } from "@/lib/prisma";
-import { currentMonthRange, getSpendingByCategory } from "@/lib/queries";
+import { getSpendingByCategory } from "@/lib/queries";
+import { currentMonthRange } from "@/lib/time";
 import { categoryInBudget } from "@/lib/budget";
-import { ensureCategories } from "@/lib/db-helpers";
+import { sumBy } from "@/lib/money";
 
-// Powers the budgets screen's two-part model:
-//  - In budget: the categories the user counts (defaults to Wants), editable
-//    limits — the real budget.
-//  - Out of budget: committed/fixed spending, tracked but not counted. Any
-//    category can be moved between the two sides.
-export async function GET() {
-  await ensureCategories();
-  const { start, end } = currentMonthRange();
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+/**
+ * The Budgets screen's two-part model, for one user:
+ *   - In budget: the categories this user counts (defaults to Wants).
+ *   - Out of budget: committed/fixed spending, tracked but not counted.
+ *
+ * Categories are per-user rows seeded at signup, so the old
+ * `await ensureCategories()` bootstrap — which created one shared global
+ * catalog — is gone (§6, §47).
+ */
+export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
+  const { id: userId, timezone } = ctx.user;
+  const { start, end } = currentMonthRange(timezone);
 
   const [byCategory, budgets, categories] = await Promise.all([
-    getSpendingByCategory(start, end),
-    prisma.budget.findMany({ include: { category: true } }),
-    prisma.category.findMany(),
+    getSpendingByCategory(userId, start, end),
+    prisma.budget.findMany({
+      where: { userId },
+      select: { id: true, amount: true, category: { select: { name: true } } },
+    }),
+    prisma.category.findMany({
+      where: { userId },
+      select: { id: true, name: true, icon: true, color: true, group: true, inBudget: true },
+    }),
   ]);
 
-  const spentByCat = new Map(byCategory.map((c) => [c.name, c.total]));
-  const budgetByCat = new Map(budgets.map((b) => [b.category.name, b]));
+  const spentByCategory = new Map(byCategory.map((c) => [c.name, c.total]));
+  const budgetByCategory = new Map(budgets.map((b) => [b.category.name, b]));
   const expense = categories.filter((c) => c.group === "expense");
 
-  const toItem = (c: (typeof expense)[number]) => {
-    const b = budgetByCat.get(c.name);
+  const toItem = (category: (typeof expense)[number]) => {
+    const budget = budgetByCategory.get(category.name);
     return {
-      categoryId: c.id,
-      name: c.name,
-      icon: c.icon,
-      color: c.color,
-      budgetId: b?.id ?? null,
-      limit: b?.amount ?? 0,
-      spent: spentByCat.get(c.name) ?? 0,
-      inBudget: categoryInBudget(c),
+      categoryId: category.id,
+      name: category.name,
+      icon: category.icon,
+      color: category.color,
+      budgetId: budget?.id ?? null,
+      limit: budget?.amount ?? 0,
+      spent: spentByCategory.get(category.name) ?? 0,
+      inBudget: categoryInBudget(category),
     };
   };
 
-  const inBudgetItems = expense
-    .filter((c) => categoryInBudget(c))
-    .map(toItem)
-    .sort((a, b) => {
-      if (!!b.limit !== !!a.limit) return b.limit ? 1 : -1;
-      return b.spent - a.spent;
-    });
+  const items = expense.map(toItem);
+  const inBudget = items.filter((i) => i.inBudget).sort((a, b) => b.spent - a.spent);
+  const outOfBudget = items.filter((i) => !i.inBudget).sort((a, b) => b.spent - a.spent);
 
-  const fixedItems = expense
-    .filter((c) => !categoryInBudget(c))
-    .map(toItem)
-    .filter((x) => x.spent > 0)
-    .sort((a, b) => b.spent - a.spent);
-
-  const wantsBudget = inBudgetItems.reduce((s, x) => s + x.limit, 0);
-  const wantsSpent = inBudgetItems.reduce((s, x) => s + x.spent, 0);
-
-  return NextResponse.json({
-    month: start.toLocaleDateString("en-US", { month: "long", year: "numeric" }),
-    fixed: { total: fixedItems.reduce((s, x) => s + x.spent, 0), items: fixedItems },
-    wants: {
-      budget: wantsBudget,
-      spent: wantsSpent,
-      hasBudget: inBudgetItems.some((x) => x.limit > 0),
-      items: inBudgetItems,
+  return safeJson({
+    inBudget,
+    outOfBudget,
+    totals: {
+      limit: sumBy(inBudget, (i) => i.limit),
+      spent: sumBy(inBudget, (i) => i.spent),
+      committed: sumBy(outOfBudget, (i) => i.spent),
     },
+    month: start.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: timezone }),
   });
-}
+});

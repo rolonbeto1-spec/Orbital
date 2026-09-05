@@ -1,43 +1,71 @@
-import { NextResponse } from "next/server";
+import { z } from "zod";
+import { route, safeJson } from "@/lib/security/api";
 import { prisma } from "@/lib/prisma";
-import { getCashflow, getSpendingByCategory, monthRange } from "@/lib/queries";
+import { getCashflow, getSpendingByCategory } from "@/lib/queries";
+import { monthRangeInZone, partsInZone } from "@/lib/time";
 import { detectRecurring } from "@/lib/recurring";
 import { WANTS_CATEGORIES } from "@/lib/buckets";
 import { getBudgetCategoryNames } from "@/lib/budget";
+import { monthKey } from "@/lib/validation";
+import { sumBy, subtractMoney, roundMoney } from "@/lib/money";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+const query = z.object({ month: monthKey.optional() }).strict();
 
 // One month of your money, summarized: what came in, what went out, where it
 // went, how that compares to the month before, and the standout purchases.
 
-export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
+/**
+ * The monthly report, for one user, over that user's calendar month.
+ *
+ * The month parameter is schema-validated (YYYY-MM within a sane year range),
+ * so it cannot become an unbounded or nonsensical date window (§14, §51).
+ */
+export const GET = route({ auth: "user", limits: ["report"], query }, async (ctx) => {
+  const { id: userId, timezone } = ctx.user;
   const now = new Date();
-  const monthParam = searchParams.get("month"); // YYYY-MM
-  let year = now.getFullYear();
-  let month0 = now.getMonth();
-  if (monthParam) {
-    const [y, m] = monthParam.split("-").map(Number);
-    if (y && m) {
-      year = y;
-      month0 = m - 1;
-    }
-  }
 
-  const { start, end } = monthRange(year, month0);
-  const prevStart = new Date(year, month0 - 1, 1);
-  const { start: pStart, end: pEnd } = monthRange(prevStart.getFullYear(), prevStart.getMonth());
+  const current = partsInZone(now, timezone);
+  let year = current.year;
+  let month = current.month; // 1-12
+  if (ctx.query.month) {
+    const [y, m] = ctx.query.month.split("-").map(Number);
+    year = y;
+    month = m;
+  }
+  const month0 = month - 1;
+
+  const { start, end } = monthRangeInZone(timezone, year, month);
+  const prevYear = month === 1 ? year - 1 : year;
+  const prevMonth = month === 1 ? 12 : month - 1;
+  const { start: pStart, end: pEnd } = monthRangeInZone(timezone, prevYear, prevMonth);
   const partial = now < end;
 
   const [flow, prevFlow, cats, prevCats, budgets, recurring, properties, txns] = await Promise.all([
-    getCashflow(start, end),
-    getCashflow(pStart, pEnd),
-    getSpendingByCategory(start, end),
-    getSpendingByCategory(pStart, pEnd),
-    prisma.budget.findMany({ include: { category: true } }),
-    detectRecurring(),
-    prisma.property.findMany(),
+    getCashflow(userId, start, end),
+    getCashflow(userId, pStart, pEnd),
+    getSpendingByCategory(userId, start, end),
+    getSpendingByCategory(userId, pStart, pEnd),
+    prisma.budget.findMany({
+      where: { userId },
+      select: { amount: true, category: { select: { name: true } } },
+    }),
+    detectRecurring(userId),
+    prisma.property.findMany({ where: { userId } }),
     prisma.transaction.findMany({
-      where: { date: { gte: start, lt: end }, amount: { gt: 0 }, account: { isBusiness: false } },
-      include: { category: true },
+      where: {
+        userId,
+        date: { gte: start, lt: end },
+        amount: { gt: 0 },
+        account: { isBusiness: false },
+      },
+      select: {
+        name: true, merchantName: true, amount: true, date: true,
+        category: { select: { name: true, group: true } },
+      },
+      take: 5000,
     }),
   ]);
 
@@ -54,8 +82,8 @@ export async function GET(req: Request) {
       isWant: WANTS_CATEGORIES.includes(c.name),
     };
   });
-  const wantsTotal = categories.filter((c) => c.isWant).reduce((s, c) => s + c.total, 0);
-  const needsTotal = categories.filter((c) => !c.isWant).reduce((s, c) => s + c.total, 0);
+  const wantsTotal = sumBy(categories.filter((c) => c.isWant), (c) => c.total);
+  const needsTotal = sumBy(categories.filter((c) => !c.isWant), (c) => c.total);
 
   // Top merchants and single biggest purchase (expenses only).
   const byMerchant = new Map<string, { total: number; count: number }>();
@@ -72,30 +100,32 @@ export async function GET(req: Request) {
     }
   }
   const topMerchants = Array.from(byMerchant.entries())
-    .map(([name, v]) => ({ name, ...v }))
+    .map(([name, v]) => ({ name, total: roundMoney(v.total), count: v.count }))
     .sort((a, b) => b.total - a.total)
     .slice(0, 5);
 
   // Budget block honors the user's customized in-budget category set.
-  const budgetNames = await getBudgetCategoryNames();
-  const wantsBudgetTotal = budgets
-    .filter((b) => budgetNames.includes(b.category.name))
-    .reduce((s, b) => s + b.amount, 0);
-  const budgetSpent = categories
-    .filter((c) => budgetNames.includes(c.name))
-    .reduce((s, c) => s + c.total, 0);
-
-  const rentalsNet = properties.reduce(
-    (s, p) => s + (p.rentIncome - p.mortgage - p.utilities - p.hoa),
-    0,
+  const budgetNames = await getBudgetCategoryNames(userId);
+  const wantsBudgetTotal = sumBy(
+    budgets.filter((b) => budgetNames.includes(b.category.name)),
+    (b) => b.amount,
+  );
+  const budgetSpent = sumBy(
+    categories.filter((c) => budgetNames.includes(c.name)),
+    (c) => c.total,
   );
 
-  const net = flow.income - flow.spending;
-  return NextResponse.json({
+  const rentalsNet = sumBy(properties, (p) =>
+    subtractMoney(p.rentIncome, p.mortgage + p.utilities + p.hoa),
+  );
+
+  const net = subtractMoney(flow.income, flow.spending);
+  return safeJson({
     month: `${year}-${String(month0 + 1).padStart(2, "0")}`,
-    label: new Date(year, month0, 1).toLocaleDateString("en-US", {
+    label: new Date(Date.UTC(year, month0, 1)).toLocaleDateString("en-US", {
       month: "long",
       year: "numeric",
+      timeZone: "UTC",
     }),
     partial,
     income: flow.income,
@@ -103,7 +133,7 @@ export async function GET(req: Request) {
     net,
     savingsRate: flow.income > 0 ? Math.round((net / flow.income) * 100) : null,
     prev: {
-      label: new Date(pStart).toLocaleDateString("en-US", { month: "long" }),
+      label: new Date(Date.UTC(prevYear, prevMonth - 1, 1)).toLocaleDateString("en-US", { month: "long", timeZone: "UTC" }),
       income: prevFlow.income,
       spending: prevFlow.spending,
     },
@@ -113,7 +143,7 @@ export async function GET(req: Request) {
     topMerchants,
     biggest,
     wantsBudget: wantsBudgetTotal > 0 ? { budget: wantsBudgetTotal, spent: budgetSpent } : null,
-    recurringMonthly: Math.round(recurring.reduce((s, r) => s + r.monthlyCost, 0) * 100) / 100,
+    recurringMonthly: roundMoney(sumBy(recurring, (r) => r.monthlyCost)),
     rentals: properties.length > 0 ? { net: rentalsNet, count: properties.length } : null,
   });
-}
+});

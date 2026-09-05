@@ -1,8 +1,46 @@
-// Seeds realistic demo data so the app is fully usable without Plaid keys.
-// Run with: npm run seed — or imported as seedDemo() by the app itself, which
-// auto-seeds an empty database on first boot (how a fresh deploy fills up).
+/**
+ * LOCAL DEVELOPMENT SEED — never runs in production (§47).
+ *
+ * The old behaviour was dangerous for a multi-tenant app: the application
+ * itself called seedDemo() when it found an empty database, so a fresh
+ * production deploy would fill itself with fake transactions, and a real user
+ * could open the app and see money that was not theirs.
+ *
+ * Now:
+ *   - nothing in src/ imports this file; the app never seeds itself;
+ *   - the data is owned by one explicitly-created demo user, so it is
+ *     tenant-scoped like any other account and cannot leak into a real one;
+ *   - the script refuses to run against a production database.
+ *
+ * Run with: npm run seed
+ */
+import { randomBytes } from "node:crypto";
 import { PrismaClient } from "../src/generated/prisma";
 import { CATEGORIES } from "../src/lib/categories";
+
+/** The demo account. Fixed id so re-seeding replaces rather than accumulates. */
+const DEMO_USER_ID = "u_demo_local_development";
+const DEMO_EMAIL = "demo@localhost.invalid";
+
+/**
+ * Refuse to run anywhere that could be real. A seed script that can be
+ * pointed at production by a stray environment variable is a data-loss
+ * incident waiting to happen (§46).
+ */
+function assertLocalOnly(): void {
+  const url = process.env.DATABASE_URL ?? "";
+  const problems: string[] = [];
+  if (process.env.NODE_ENV === "production") problems.push("NODE_ENV=production");
+  if (process.env.VERCEL) problems.push("running on Vercel");
+  if (url.startsWith("postgres")) problems.push("DATABASE_URL points at Postgres");
+  if (process.env.PLAID_SECRET) problems.push("PLAID_SECRET is set (real-money mode)");
+  if (problems.length > 0) {
+    throw new Error(
+      `Refusing to seed demo data: ${problems.join(", ")}. ` +
+        "This script is for local SQLite development only.",
+    );
+  }
+}
 
 function rand(min: number, max: number) {
   return Math.random() * (max - min) + min;
@@ -56,20 +94,46 @@ const RECURRING = [
 ];
 
 export async function seedDemo(prisma: PrismaClient) {
-  console.log("Clearing existing data…");
-  await prisma.transaction.deleteMany();
-  await prisma.holding.deleteMany();
-  await prisma.account.deleteMany();
-  await prisma.item.deleteMany();
-  await prisma.budget.deleteMany();
-  await prisma.goal.deleteMany();
-  await prisma.category.deleteMany();
+  assertLocalOnly();
+
+  const userId = DEMO_USER_ID;
+
+  console.log("Creating the local demo user…");
+  await prisma.user.upsert({
+    where: { id: userId },
+    update: {},
+    create: {
+      id: userId,
+      email: DEMO_EMAIL,
+      name: "Demo",
+      // Verified so the demo account can use the app without a mail server.
+      emailVerified: true,
+      timezone: "America/Los_Angeles",
+      plaidUserRef: `mu_demo_${randomBytes(8).toString("hex")}`,
+      termsAcceptedAt: new Date(),
+      privacyAcceptedAt: new Date(),
+      onboardedAt: new Date(),
+    },
+  });
+
+  // Scoped to the demo user: re-seeding never touches another account's rows.
+  console.log("Clearing the demo user's existing data…");
+  await prisma.transaction.deleteMany({ where: { userId } });
+  await prisma.holding.deleteMany({ where: { userId } });
+  await prisma.account.deleteMany({ where: { userId } });
+  await prisma.item.deleteMany({ where: { userId } });
+  await prisma.budget.deleteMany({ where: { userId } });
+  await prisma.merchantRule.deleteMany({ where: { userId } });
+  await prisma.goal.deleteMany({ where: { userId } });
+  await prisma.property.deleteMany({ where: { userId } });
+  await prisma.folder.deleteMany({ where: { userId } });
+  await prisma.category.deleteMany({ where: { userId } });
 
   console.log("Seeding categories…");
   await prisma.$transaction(
     CATEGORIES.map((c) =>
       prisma.category.create({
-        data: { name: c.name, icon: c.icon, color: c.color, group: c.group },
+        data: { userId, name: c.name, icon: c.icon, color: c.color, group: c.group },
       })
     )
   );
@@ -82,34 +146,51 @@ export async function seedDemo(prisma: PrismaClient) {
   const bank = await prisma.item.create({
     data: {
       plaidItemId: "demo-item-bank",
-      accessToken: "demo",
+      userId,
+      // Demo connections carry a clearly-fake encrypted credential; they are
+      // never used against the real Plaid API.
+      accessTokenCipher: "v1.demo.demo.demo.demo",
+      accessTokenKeyId: "demo",
       institutionName: "Demo Bank (sample)",
     },
   });
   const cardCo = await prisma.item.create({
     data: {
       plaidItemId: "demo-item-card",
-      accessToken: "demo",
+      userId,
+      // Demo connections carry a clearly-fake encrypted credential; they are
+      // never used against the real Plaid API.
+      accessTokenCipher: "v1.demo.demo.demo.demo",
+      accessTokenKeyId: "demo",
       institutionName: "Demo Card Co. (sample)",
     },
   });
   const broker = await prisma.item.create({
     data: {
       plaidItemId: "demo-item-invest",
-      accessToken: "demo",
+      userId,
+      // Demo connections carry a clearly-fake encrypted credential; they are
+      // never used against the real Plaid API.
+      accessTokenCipher: "v1.demo.demo.demo.demo",
+      accessTokenKeyId: "demo",
       institutionName: "Demo Invest (sample)",
     },
   });
   const bizBank = await prisma.item.create({
     data: {
       plaidItemId: "demo-item-business",
-      accessToken: "demo",
+      userId,
+      // Demo connections carry a clearly-fake encrypted credential; they are
+      // never used against the real Plaid API.
+      accessTokenCipher: "v1.demo.demo.demo.demo",
+      accessTokenKeyId: "demo",
       institutionName: "Demo Business Bank (sample)",
     },
   });
 
   const checking = await prisma.account.create({
     data: {
+      userId,
       plaidAccountId: "demo-checking",
       itemId: bank.id,
       name: "Everyday Checking",
@@ -122,6 +203,7 @@ export async function seedDemo(prisma: PrismaClient) {
   });
   const savings = await prisma.account.create({
     data: {
+      userId,
       plaidAccountId: "demo-savings",
       itemId: bank.id,
       name: "High-Yield Savings",
@@ -134,6 +216,7 @@ export async function seedDemo(prisma: PrismaClient) {
   });
   const credit = await prisma.account.create({
     data: {
+      userId,
       plaidAccountId: "demo-credit",
       itemId: cardCo.id,
       name: "Cash Rewards Card",
@@ -146,6 +229,7 @@ export async function seedDemo(prisma: PrismaClient) {
   });
   const brokerage = await prisma.account.create({
     data: {
+      userId,
       plaidAccountId: "demo-invest",
       itemId: broker.id,
       name: "Brokerage",
@@ -157,6 +241,7 @@ export async function seedDemo(prisma: PrismaClient) {
   });
   const cryptoWallet = await prisma.account.create({
     data: {
+      userId,
       plaidAccountId: "demo-crypto",
       itemId: broker.id,
       name: "Crypto Wallet",
@@ -168,6 +253,7 @@ export async function seedDemo(prisma: PrismaClient) {
   });
   const bizChecking = await prisma.account.create({
     data: {
+      userId,
       plaidAccountId: "demo-business",
       itemId: bizBank.id,
       name: "Business Checking",
@@ -183,12 +269,12 @@ export async function seedDemo(prisma: PrismaClient) {
   // Brokerage holdings sum to its balance; same for the crypto wallet.
   await prisma.holding.createMany({
     data: [
-      { accountId: brokerage.id, symbol: "VOO", name: "Vanguard S&P 500 ETF", quantity: 30, price: 512.4, value: 15372.0, kind: "etf" },
-      { accountId: brokerage.id, symbol: "AAPL", name: "Apple", quantity: 25, price: 224.5, value: 5612.5, kind: "stock" },
-      { accountId: brokerage.id, symbol: "NVDA", name: "NVIDIA", quantity: 40, price: 131.2, value: 5248.0, kind: "stock" },
-      { accountId: brokerage.id, symbol: "USD", name: "Cash sweep", quantity: 2218.4, price: 1, value: 2218.4, kind: "cash" },
-      { accountId: cryptoWallet.id, symbol: "BTC", name: "Bitcoin", quantity: 0.12, price: 64500, value: 7740.0, kind: "crypto" },
-      { accountId: cryptoWallet.id, symbol: "ETH", name: "Ethereum", quantity: 1.5, price: 3503, value: 5254.5, kind: "crypto" },
+      { userId, accountId: brokerage.id, symbol: "VOO", name: "Vanguard S&P 500 ETF", quantity: 30, price: 512.4, value: 15372.0, kind: "etf" },
+      { userId, accountId: brokerage.id, symbol: "AAPL", name: "Apple", quantity: 25, price: 224.5, value: 5612.5, kind: "stock" },
+      { userId, accountId: brokerage.id, symbol: "NVDA", name: "NVIDIA", quantity: 40, price: 131.2, value: 5248.0, kind: "stock" },
+      { userId, accountId: brokerage.id, symbol: "USD", name: "Cash sweep", quantity: 2218.4, price: 1, value: 2218.4, kind: "cash" },
+      { userId, accountId: cryptoWallet.id, symbol: "BTC", name: "Bitcoin", quantity: 0.12, price: 64500, value: 7740.0, kind: "crypto" },
+      { userId, accountId: cryptoWallet.id, symbol: "ETH", name: "Ethereum", quantity: 1.5, price: 3503, value: 5254.5, kind: "crypto" },
     ],
   });
 
@@ -198,6 +284,7 @@ export async function seedDemo(prisma: PrismaClient) {
     const today0 = new Date();
     let bc = 0;
     const bizTxns: {
+      userId: string;
       plaidTransactionId: string;
       accountId: string;
       amount: number;
@@ -213,7 +300,8 @@ export async function seedDemo(prisma: PrismaClient) {
       if (d % 11 === 3) {
         const client = pick(CLIENTS);
         bizTxns.push({
-          plaidTransactionId: `demo-biz-${bc++}`,
+          userId,
+      plaidTransactionId: `demo-biz-${bc++}`,
           accountId: bizChecking.id,
           amount: -round2(rand(1100, 2600)),
           date,
@@ -230,7 +318,8 @@ export async function seedDemo(prisma: PrismaClient) {
           ["Google Workspace", 14.4],
         ] as const) {
           bizTxns.push({
-            plaidTransactionId: `demo-biz-${bc++}`,
+            userId,
+      plaidTransactionId: `demo-biz-${bc++}`,
             accountId: bizChecking.id,
             amount: amt,
             date,
@@ -243,7 +332,8 @@ export async function seedDemo(prisma: PrismaClient) {
       // contractor payout mid-month
       if (date.getDate() === 16) {
         bizTxns.push({
-          plaidTransactionId: `demo-biz-${bc++}`,
+          userId,
+      plaidTransactionId: `demo-biz-${bc++}`,
           accountId: bizChecking.id,
           amount: round2(rand(380, 900)),
           date,
@@ -256,7 +346,8 @@ export async function seedDemo(prisma: PrismaClient) {
       if (d % 17 === 5) {
         const supplier = pick(["Office Depot", "Uline", "Best Buy Business"]);
         bizTxns.push({
-          plaidTransactionId: `demo-biz-${bc++}`,
+          userId,
+      plaidTransactionId: `demo-biz-${bc++}`,
           accountId: bizChecking.id,
           amount: round2(rand(24, 160)),
           date,
@@ -273,6 +364,7 @@ export async function seedDemo(prisma: PrismaClient) {
   const today = new Date();
   const DAYS = 150;
   const txns: {
+    userId: string;
     plaidTransactionId: string;
     accountId: string;
     amount: number;
@@ -291,7 +383,8 @@ export async function seedDemo(prisma: PrismaClient) {
     // Biweekly paycheck (income = negative amount)
     if (d % 14 === 0) {
       txns.push({
-        plaidTransactionId: `demo-tx-${counter++}`,
+        userId,
+      plaidTransactionId: `demo-tx-${counter++}`,
         accountId: checking.id,
         amount: -round2(rand(2550, 2700)),
         date,
@@ -305,7 +398,8 @@ export async function seedDemo(prisma: PrismaClient) {
     for (const r of RECURRING) {
       if (date.getDate() === r.day) {
         txns.push({
-          plaidTransactionId: `demo-tx-${counter++}`,
+          userId,
+      plaidTransactionId: `demo-tx-${counter++}`,
           accountId: r.amount > 100 ? checking.id : credit.id,
           amount: round2(r.amount),
           date,
@@ -319,7 +413,8 @@ export async function seedDemo(prisma: PrismaClient) {
     // Monthly transfer to savings
     if (date.getDate() === 2) {
       txns.push({
-        plaidTransactionId: `demo-tx-${counter++}`,
+        userId,
+      plaidTransactionId: `demo-tx-${counter++}`,
         accountId: checking.id,
         amount: 500,
         date,
@@ -345,7 +440,8 @@ export async function seedDemo(prisma: PrismaClient) {
       const effCategory =
         GAS.includes(merchant) && amount < 15 ? "Food & Dining" : category;
       txns.push({
-        plaidTransactionId: `demo-tx-${counter++}`,
+        userId,
+      plaidTransactionId: `demo-tx-${counter++}`,
         accountId: pick(spendAccounts),
         amount,
         date,
@@ -368,7 +464,8 @@ export async function seedDemo(prisma: PrismaClient) {
   await prisma.transaction.createMany({
     data: [
       {
-        plaidTransactionId: "demo-owed-1",
+        userId,
+      plaidTransactionId: "demo-owed-1",
         accountId: credit.id,
         amount: 180,
         date: dRecent(16),
@@ -380,7 +477,8 @@ export async function seedDemo(prisma: PrismaClient) {
         notes: "Concert tickets — Jordan's share",
       },
       {
-        plaidTransactionId: "demo-owed-2",
+        userId,
+      plaidTransactionId: "demo-owed-2",
         accountId: checking.id,
         amount: 240,
         date: dRecent(9),
@@ -391,7 +489,8 @@ export async function seedDemo(prisma: PrismaClient) {
         reimbursedAmount: 120, // half paid back so far
       },
       {
-        plaidTransactionId: "demo-repay-1",
+        userId,
+      plaidTransactionId: "demo-repay-1",
         accountId: checking.id,
         amount: -120,
         date: dRecent(7),
@@ -413,16 +512,16 @@ export async function seedDemo(prisma: PrismaClient) {
   ];
   for (const b of budgets) {
     const id = catId(b.name);
-    if (id) await prisma.budget.create({ data: { categoryId: id, amount: b.amount } });
+    if (id) await prisma.budget.create({ data: { userId, categoryId: id, amount: b.amount } });
   }
 
   console.log("Seeding goals…");
   await prisma.goal.createMany({
     data: [
-      { name: "Emergency Fund", targetAmount: 15000, currentAmount: 9200, icon: "PiggyBank", color: "#22c55e" },
-      { name: "Japan Trip", targetAmount: 5000, currentAmount: 1850, icon: "Plane", color: "#06b6d4" },
-      { name: "New Laptop", targetAmount: 2500, currentAmount: 2500, icon: "Target", color: "#6366f1" },
-      { name: "Down Payment", targetAmount: 60000, currentAmount: 18400, icon: "Home", color: "#a855f7" },
+      { userId, name: "Emergency Fund", targetAmount: 15000, currentAmount: 9200, icon: "PiggyBank", color: "#22c55e" },
+      { userId, name: "Japan Trip", targetAmount: 5000, currentAmount: 1850, icon: "Plane", color: "#06b6d4" },
+      { userId, name: "New Laptop", targetAmount: 2500, currentAmount: 2500, icon: "Target", color: "#6366f1" },
+      { userId, name: "Down Payment", targetAmount: 60000, currentAmount: 18400, icon: "Home", color: "#a855f7" },
     ],
   });
 
@@ -431,7 +530,7 @@ export async function seedDemo(prisma: PrismaClient) {
   await prisma.property.createMany({
     data: [
       {
-        name: "Elm St duplex",
+        userId, name: "Elm St duplex",
         rentIncome: 2400,
         mortgage: 1750,
         utilities: 180,
@@ -441,7 +540,7 @@ export async function seedDemo(prisma: PrismaClient) {
         notes: "Tenants cover it — cash-flows every month.",
       },
       {
-        name: "Oak Ave",
+        userId, name: "Oak Ave",
         rentIncome: 1900,
         mortgage: 1820,
         utilities: 210,

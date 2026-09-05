@@ -1,35 +1,35 @@
-import { NextResponse } from "next/server";
+import { route, safeJson } from "@/lib/security/api";
 import { prisma } from "@/lib/prisma";
+import { requireOwned } from "@/lib/security/ownership";
+import { goalUpdate } from "@/lib/validation";
 
-export async function PATCH(
-  req: Request,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const { id } = await params;
-  const body = await req.json();
-  const data: Record<string, unknown> = {};
-  for (const key of ["name", "targetAmount", "currentAmount", "icon", "color"]) {
-    if (key in body) data[key] = body[key];
-  }
-  if ("targetDate" in body) data.targetDate = body.targetDate ? new Date(body.targetDate) : null;
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-  try {
-    const goal = await prisma.goal.update({ where: { id }, data });
-    return NextResponse.json(goal);
-  } catch {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
-  }
-}
+export const PATCH = route(
+  { auth: "user", limits: ["write"], body: goalUpdate },
+  async (ctx) => {
+    const id = ctx.params.id;
+    await requireOwned("goal", id, ctx.user.id, { select: { id: true } });
 
-export async function DELETE(
-  _req: Request,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const { id } = await params;
-  try {
-    await prisma.goal.delete({ where: { id } });
-    return NextResponse.json({ ok: true });
-  } catch {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
-  }
-}
+    const { targetDate, ...rest } = ctx.body;
+    await prisma.goal.updateMany({
+      where: { id, userId: ctx.user.id },
+      data: {
+        ...rest,
+        ...(targetDate !== undefined
+          ? { targetDate: targetDate ? new Date(targetDate) : null }
+          : {}),
+      },
+    });
+    const goal = await prisma.goal.findFirst({ where: { id, userId: ctx.user.id } });
+    return safeJson(goal);
+  },
+);
+
+export const DELETE = route({ auth: "user", limits: ["write"] }, async (ctx) => {
+  const id = ctx.params.id;
+  await requireOwned("goal", id, ctx.user.id, { select: { id: true } });
+  await prisma.goal.deleteMany({ where: { id, userId: ctx.user.id } });
+  return safeJson({ ok: true });
+});

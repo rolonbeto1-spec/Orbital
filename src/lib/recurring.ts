@@ -1,4 +1,6 @@
+import "server-only";
 import { prisma } from "@/lib/prisma";
+import { roundMoney, scaleMoney } from "@/lib/money";
 
 // Detects merchants that charge on a schedule — subscriptions, bills, rent.
 // A merchant qualifies when it has 3+ charges at a near-regular interval
@@ -31,13 +33,28 @@ function median(nums: number[]): number {
   return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
 }
 
-export async function detectRecurring(): Promise<RecurringCharge[]> {
+/**
+ * Detect recurring charges for ONE user.
+ *
+ * Bounded at MAX_ROWS so a very long history cannot pull an unlimited number
+ * of transactions into memory on an endpoint anyone can call repeatedly
+ * (§51, §72).
+ */
+const MAX_ROWS = 4000;
+
+export async function detectRecurring(userId: string): Promise<RecurringCharge[]> {
   const since = new Date();
   since.setDate(since.getDate() - 180);
   const txns = await prisma.transaction.findMany({
-    where: { date: { gte: since }, amount: { gt: 0 }, account: { isBusiness: false } },
-    include: { category: true },
+    where: {
+      userId,
+      date: { gte: since },
+      amount: { gt: 0 },
+      account: { isBusiness: false },
+    },
+    include: { category: { select: { name: true, icon: true, color: true, group: true } } },
     orderBy: { date: "asc" },
+    take: MAX_ROWS,
   });
 
   const byMerchant = new Map<string, typeof txns>();

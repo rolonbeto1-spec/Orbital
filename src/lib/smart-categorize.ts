@@ -138,18 +138,29 @@ export async function learnFromCorrection(
   // One unbounded rule per (user, merchant); latest correction wins.
   // upsert on the composite unique key rather than find-then-write, so two
   // concurrent corrections cannot both insert (§48).
-  await prisma.merchantRule.upsert({
-    where: {
-      userId_match_minAmount_maxAmount: {
-        userId,
-        match,
-        minAmount: null,
-        maxAmount: null,
-      },
-    },
-    create: { userId, match, categoryId, source: "learned" },
-    update: { categoryId, source: "learned" },
+  // Prisma's composite-unique input does not accept nulls, so the unbounded
+  // rule is found explicitly and then written. The create is guarded against
+  // a concurrent insert by the same unique constraint (§48).
+  const existing = await prisma.merchantRule.findFirst({
+    where: { userId, match, minAmount: null, maxAmount: null },
+    select: { id: true },
   });
+  if (existing) {
+    await prisma.merchantRule.update({
+      where: { id: existing.id },
+      data: { categoryId, source: "learned" },
+    });
+    return;
+  }
+  await prisma.merchantRule
+    .create({ data: { userId, match, categoryId, source: "learned" } })
+    .catch(async () => {
+      // Lost a race: another request created it first. Apply our value.
+      await prisma.merchantRule.updateMany({
+        where: { userId, match, minAmount: null, maxAmount: null },
+        data: { categoryId, source: "learned" },
+      });
+    });
 }
 
 /**

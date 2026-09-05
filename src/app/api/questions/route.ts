@@ -1,39 +1,56 @@
-import { NextResponse } from "next/server";
+import { z } from "zod";
+import { route, safeJson, HttpError } from "@/lib/security/api";
 import { prisma } from "@/lib/prisma";
-import { getCategoryIdMap } from "@/lib/db-helpers";
+import { getCategoryIdMap, getJsonSetting, setJsonSetting, getSetting, setSetting } from "@/lib/db-helpers";
+import { requireOwned } from "@/lib/security/ownership";
 import { learnFromCorrection } from "@/lib/smart-categorize";
 import { detectRecurring } from "@/lib/recurring";
+import { idSchema, shortText } from "@/lib/validation";
 
-// Metta asks: the app notices things it doesn't understand and asks the
-// user directly. Answers teach it permanently (same learning path as
-// manual corrections). Dismissals and acknowledgements are remembered.
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-async function readSet(key: string): Promise<Set<string>> {
-  const row = await prisma.setting.findUnique({ where: { key } });
-  try {
-    return new Set(row ? (JSON.parse(row.value) as string[]) : []);
-  } catch {
-    return new Set();
-  }
+/**
+ * Metta asks: the app notices things it does not understand and asks the user.
+ *
+ * Answers teach the categoriser permanently, through exactly the same
+ * ownership-checked path as a manual correction in Activity — the question
+ * card is not a shortcut around authorization (§7, §32).
+ *
+ * Dismissals and acknowledgements live in the per-user Setting table. The old
+ * global keys ("questionsDismissed", "recurringAcked", "digestLast") would
+ * have been shared by every tenant (§6).
+ */
+
+const DISMISSED_KEY = "questionsDismissed";
+const ACKED_KEY = "recurringAcked";
+const DIGEST_KEY = "digestLast";
+
+async function readSet(userId: string, key: string): Promise<Set<string>> {
+  const values = await getJsonSetting<string[]>(userId, key, []);
+  return new Set(Array.isArray(values) ? values : []);
 }
 
-async function writeSet(key: string, set: Set<string>) {
-  const value = JSON.stringify([...set].slice(-400)); // bounded memory
-  await prisma.setting.upsert({ where: { key }, update: { value }, create: { key, value } });
+async function writeSet(userId: string, key: string, set: Set<string>): Promise<void> {
+  // Bounded memory: keep the most recent 400 entries.
+  await setJsonSetting(userId, key, [...set].slice(-400));
 }
 
-export async function GET() {
+export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
+  const userId = ctx.user.id;
+
   const [dismissed, acked] = await Promise.all([
-    readSet("questionsDismissed"),
-    readSet("recurringAcked"),
+    readSet(userId, DISMISSED_KEY),
+    readSet(userId, ACKED_KEY),
   ]);
 
   const since = new Date();
   since.setDate(since.getDate() - 30);
 
-  // Mystery charges: unsorted or "Other" spending worth asking about.
+  // Mystery charges: this user's unsorted or "Other" spending.
   const mysteries = await prisma.transaction.findMany({
     where: {
+      userId,
       amount: { gt: 0 },
       date: { gte: since },
       OR: [{ categoryId: null }, { category: { name: "Other" } }],
@@ -42,6 +59,7 @@ export async function GET() {
     take: 12,
     select: { id: true, name: true, merchantName: true, amount: true, date: true },
   });
+
   const chargeQuestions = mysteries
     .filter((t) => !dismissed.has(t.id))
     .slice(0, 3)
@@ -53,8 +71,7 @@ export async function GET() {
       date: t.date,
     }));
 
-  // Recurring charges the user hasn't acknowledged yet.
-  const recurring = await detectRecurring();
+  const recurring = await detectRecurring(userId);
   const recurringQuestions = recurring
     .filter((r) => !acked.has(r.merchant.toLowerCase()))
     .slice(0, 3)
@@ -66,66 +83,85 @@ export async function GET() {
       monthlyCost: r.monthlyCost,
     }));
 
-  // Weekly digest invitation: at most once every 7 days.
-  const digestRow = await prisma.setting.findUnique({ where: { key: "digestLast" } });
+  const digestLast = await getSetting(userId, DIGEST_KEY);
   const digestDue =
-    !digestRow || Date.now() - new Date(digestRow.value).getTime() > 7 * 86400_000;
-  const digestQuestions = digestDue ? [{ kind: "digest" as const }] : [];
+    !digestLast || Date.now() - new Date(digestLast).getTime() > 7 * 86_400_000;
 
-  return NextResponse.json({
-    questions: [...digestQuestions, ...chargeQuestions, ...recurringQuestions],
+  return safeJson({
+    questions: [
+      ...(digestDue ? [{ kind: "digest" as const }] : []),
+      ...chargeQuestions,
+      ...recurringQuestions,
+    ],
   });
-}
+});
 
-export async function POST(req: Request) {
-  try {
-    const body = (await req.json()) as {
-      kind: "charge" | "recurring" | "digest";
-      txnId?: string;
-      categoryName?: string;
-      merchant?: string;
-    };
+const answerBody = z
+  .object({
+    kind: z.enum(["charge", "recurring", "digest"]),
+    txnId: idSchema.optional(),
+    categoryName: shortText(60).optional(),
+    merchant: shortText(120).optional(),
+  })
+  .strict();
 
-    if (body.kind === "digest") {
-      const value = new Date().toISOString();
-      await prisma.setting.upsert({
-        where: { key: "digestLast" },
-        update: { value },
-        create: { key: "digestLast", value },
-      });
-      return NextResponse.json({ ok: true });
+export const POST = route(
+  { auth: "user", limits: ["write"], body: answerBody },
+  async (ctx) => {
+    const userId = ctx.user.id;
+
+    if (ctx.body.kind === "digest") {
+      await setSetting(userId, DIGEST_KEY, new Date().toISOString());
+      return safeJson({ ok: true });
     }
 
-    if (body.kind === "charge" && body.txnId) {
-      if (body.categoryName) {
-        const categoryMap = await getCategoryIdMap();
-        const categoryId = categoryMap[body.categoryName];
-        const txn = await prisma.transaction.findUnique({ where: { id: body.txnId } });
-        if (!categoryId || !txn) {
-          return NextResponse.json({ error: "Unknown category or charge." }, { status: 400 });
+    if (ctx.body.kind === "charge" && ctx.body.txnId) {
+      if (ctx.body.categoryName) {
+        // The category name is resolved against THIS user's own catalog, and
+        // the transaction is fetched with ownership in the query — a crafted
+        // txnId belonging to another tenant is a 404, not a write (§7).
+        const categoryMap = await getCategoryIdMap(userId);
+        const categoryId = categoryMap[ctx.body.categoryName];
+        if (!categoryId) {
+          throw new HttpError(400, "unknown category", "That category does not exist.");
         }
-        await prisma.transaction.update({
-          where: { id: txn.id },
+
+        const txn = await requireOwned<{
+          id: string;
+          name: string;
+          merchantName: string | null;
+          amount: number;
+        }>("transaction", ctx.body.txnId, userId, {
+          select: { id: true, name: true, merchantName: true, amount: true },
+        });
+
+        await prisma.transaction.updateMany({
+          where: { id: txn.id, userId },
           data: { categoryId },
         });
+
         // The user's answer is law: learn the merchant permanently.
-        await learnFromCorrection(txn.merchantName || txn.name, categoryId, txn.amount);
+        await learnFromCorrection(
+          userId,
+          txn.merchantName || txn.name,
+          categoryId,
+          txn.amount,
+        );
       }
-      const dismissed = await readSet("questionsDismissed");
-      dismissed.add(body.txnId);
-      await writeSet("questionsDismissed", dismissed);
-      return NextResponse.json({ ok: true });
+
+      const dismissed = await readSet(userId, DISMISSED_KEY);
+      dismissed.add(ctx.body.txnId);
+      await writeSet(userId, DISMISSED_KEY, dismissed);
+      return safeJson({ ok: true });
     }
 
-    if (body.kind === "recurring" && body.merchant) {
-      const acked = await readSet("recurringAcked");
-      acked.add(body.merchant.toLowerCase());
-      await writeSet("recurringAcked", acked);
-      return NextResponse.json({ ok: true });
+    if (ctx.body.kind === "recurring" && ctx.body.merchant) {
+      const acked = await readSet(userId, ACKED_KEY);
+      acked.add(ctx.body.merchant.toLowerCase());
+      await writeSet(userId, ACKED_KEY, acked);
+      return safeJson({ ok: true });
     }
 
-    return NextResponse.json({ error: "Unknown question." }, { status: 400 });
-  } catch {
-    return NextResponse.json({ error: "Couldn't record that." }, { status: 500 });
-  }
-}
+    throw new HttpError(400, "unknown question", "That question could not be recorded.");
+  },
+);

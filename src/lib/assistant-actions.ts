@@ -1,9 +1,12 @@
+import "server-only";
 import { prisma } from "@/lib/prisma";
 import { formatCurrency } from "@/lib/format";
 import { getAlertPrefs, setAlertPrefs } from "@/lib/alert-prefs";
 import { CATEGORIES } from "@/lib/categories";
 import { learnFromCorrection } from "@/lib/smart-categorize";
-import { getCashflow, getSpendingByCategory, currentMonthRange } from "@/lib/queries";
+import { getCashflow, getSpendingByCategory } from "@/lib/queries";
+import { currentMonthRange } from "@/lib/time";
+import type { AuthedUser } from "@/lib/security/session";
 import { detectRecurring } from "@/lib/recurring";
 import type { AssistantAnswer } from "@/lib/assistant";
 
@@ -49,9 +52,23 @@ function resolveCategoryName(input: string): string | null {
 
 // The assistant can DO things, not just answer. Commands are parsed
 // deterministically (works with or without an API key) and run before the
-// Q&A engines: filing charges into folders, switching budget reminders.
+/**
+ * Deterministic assistant actions (§32).
+ *
+ * These are the token-free commands the chat understands directly. They are
+ * the answer to "never execute arbitrary AI-generated commands": the model
+ * does not choose an action or supply parameters here at all. The user's own
+ * text is matched against a fixed set of patterns, and every object the
+ * action touches is looked up inside the caller's tenancy.
+ *
+ * Every function takes `user`. Every query is scoped by `user.id`. There is
+ * no code path in this file that can read or write another tenant's row.
+ */
 
-export async function maybeAction(question: string): Promise<AssistantAnswer | null> {
+export async function maybeAction(
+  user: AuthedUser,
+  question: string,
+): Promise<AssistantAnswer | null> {
   const q = question.toLowerCase().trim();
 
   // ---- "where's my money going" — the full breakdown, on demand ----
@@ -59,11 +76,11 @@ export async function maybeAction(question: string): Promise<AssistantAnswer | n
     /where(?:'?s| is| does| did)?\s+(?:my |the |all my )?money(?:\s+go(?:ing)?)?/.test(q) ||
     /\b(money breakdown|break\s*down my (spending|money))\b/.test(q)
   ) {
-    const { start, end } = currentMonthRange();
+    const { start, end } = currentMonthRange(user.timezone);
     const [cashflow, byCategory, recurring] = await Promise.all([
-      getCashflow(start, end),
-      getSpendingByCategory(start, end),
-      detectRecurring(),
+      getCashflow(user.id, start, end),
+      getSpendingByCategory(user.id, start, end),
+      detectRecurring(user.id),
     ]);
     const total = byCategory.reduce((s, c) => s + c.total, 0);
     const top = byCategory.slice(0, 5);
@@ -72,6 +89,7 @@ export async function maybeAction(question: string): Promise<AssistantAnswer | n
     // Biggest merchants this month.
     const txns = await prisma.transaction.findMany({
       where: {
+        userId: user.id,
         date: { gte: start, lte: end },
         amount: { gt: 0 },
         account: { isBusiness: false },
@@ -123,12 +141,17 @@ export async function maybeAction(question: string): Promise<AssistantAnswer | n
     const merchantQuery = recat[1].trim();
     const categoryName = resolveCategoryName(recat[2]);
     if (categoryName) {
-      const category = await prisma.category.findFirst({ where: { name: categoryName } });
+      // This user's own category row, not a shared global one.
+      const category = await prisma.category.findFirst({
+        where: { userId: user.id, name: categoryName },
+        select: { id: true, name: true },
+      });
       if (category) {
         const since = new Date();
         since.setDate(since.getDate() - 180);
         const recent = await prisma.transaction.findMany({
-          where: { date: { gte: since } },
+          where: {
+            userId: user.id, date: { gte: since } },
           select: { id: true, name: true, merchantName: true, categoryId: true, amount: true },
           orderBy: { date: "desc" },
           take: 600,
@@ -145,8 +168,8 @@ export async function maybeAction(question: string): Promise<AssistantAnswer | n
         let moved = 0;
         for (const t of matches) {
           if (t.categoryId !== category.id) {
-            await prisma.transaction.update({
-              where: { id: t.id },
+            await prisma.transaction.updateMany({
+              where: { userId: user.id, id: t.id },
               data: { categoryId: category.id },
             });
             moved++;
@@ -154,7 +177,7 @@ export async function maybeAction(question: string): Promise<AssistantAnswer | n
         }
         // Teach the permanent rule off the real merchant string.
         const merchant = matches[0].merchantName || matches[0].name;
-        await learnFromCorrection(merchant, category.id);
+        await learnFromCorrection(user.id, merchant, category.id);
         return {
           answer:
             moved > 0
@@ -185,11 +208,15 @@ export async function maybeAction(question: string): Promise<AssistantAnswer | n
       };
     }
     // Force a full audit and logo pass right now, not on their timers.
-    await prisma.setting.deleteMany({ where: { key: { in: ["aiAuditLast", "aiLogosLast"] } } });
+    // Clear only THIS user's timers, so one person asking to re-sort does
+    // not force a re-run for everybody (§6).
+    await prisma.setting.deleteMany({
+      where: { userId: user.id, key: { in: ["aiAuditLast", "aiLogosLast"] } },
+    });
     const { aiIdentifyLogos } = await import("@/lib/ai-categorize");
-    const sorted = await aiSortNewTransactions();
-    const audited = await aiAuditTransactions();
-    await aiIdentifyLogos();
+    const sorted = await aiSortNewTransactions(user.id);
+    const audited = await aiAuditTransactions(user.id);
+    await aiIdentifyLogos(user.id);
     const total = sorted + audited;
     return {
       answer:
@@ -210,6 +237,7 @@ export async function maybeAction(question: string): Promise<AssistantAnswer | n
 
     const txn = await prisma.transaction.findFirst({
       where: {
+        userId: user.id,
         amount: { gt: 0 },
         ...(merchantQuery
           ? {
@@ -231,11 +259,14 @@ export async function maybeAction(question: string): Promise<AssistantAnswer | n
       };
     }
     const folder = await prisma.folder.upsert({
-      where: { name: folderName },
+      where: { userId_name: { userId: user.id, name: folderName } },
       update: {},
-      create: { name: folderName },
+      create: { userId: user.id, name: folderName },
     });
-    await prisma.transaction.update({ where: { id: txn.id }, data: { folderId: folder.id } });
+    await prisma.transaction.updateMany({
+      where: { id: txn.id, userId: user.id },
+      data: { folderId: folder.id },
+    });
     const when = txn.date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
     return {
       answer: `Saved it: ${txn.merchantName || txn.name} — ${formatCurrency(txn.amount)} on ${when} (${txn.account.name}) is now in the “${folder.name}” folder. Find it any time on the Folders screen.`,
@@ -266,7 +297,7 @@ export async function maybeAction(question: string): Promise<AssistantAnswer | n
       patch.full = !turningOff;
       parts.push(`budget alerts ${turningOff ? "off" : "on"} (halfway + over-budget)`);
     }
-    const prefs = await setAlertPrefs(patch);
+    const prefs = await setAlertPrefs(user.id, patch);
     const state = `Now: halfway ${prefs.half ? "on" : "off"} · over-budget ${prefs.full ? "on" : "off"} · weekly ${prefs.weekly ? "on" : "off"}.`;
     return {
       answer: `Done — turned ${joinList(parts)}. Heads-ups appear on your Home screen. ${state}`,
@@ -275,7 +306,7 @@ export async function maybeAction(question: string): Promise<AssistantAnswer | n
 
   // ---- reminder switches without the word budget ("weekly check-ins") ----
   if (wantsReminder && /(weekly|every week)/.test(q) && /(spend|pace|check)/.test(q)) {
-    const prefs = await setAlertPrefs({ weekly: !turningOff });
+    const prefs = await setAlertPrefs(user.id, { weekly: !turningOff });
     return {
       answer: `Done — weekly pace check-ins are ${prefs.weekly ? "on" : "off"}. You'll see “week 2 of 4” style updates in the Heads up card.`,
     };

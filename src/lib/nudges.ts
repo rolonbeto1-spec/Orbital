@@ -1,8 +1,11 @@
+import "server-only";
 import { prisma } from "@/lib/prisma";
 import { getReimbursements } from "@/lib/queries";
 import { getBudgetStatus } from "@/lib/budget";
 import { getAlertPrefs } from "@/lib/alert-prefs";
 import { formatCurrency, formatDateShort } from "@/lib/format";
+import { sumBy, subtractMoney } from "@/lib/money";
+import { partsInZone } from "@/lib/time";
 
 // Proactive "heads up" messages: the app noticing things so you don't have to.
 // Pure heuristics over your own data — no external API.
@@ -26,15 +29,21 @@ function daysAgo(n: number) {
 // 1) Budget pace: are you spending faster than the month is passing?
 // Uses the user's customized in-budget category set and their reminder
 // preferences (half-mark alert, full-budget alert, weekly check-ins).
-async function budgetPaceNudge(): Promise<Nudge | null> {
-  const [status, prefs] = await Promise.all([getBudgetStatus(), getAlertPrefs()]);
+async function budgetPaceNudge(userId: string, timeZone: string): Promise<Nudge | null> {
+  const [status, prefs] = await Promise.all([
+    getBudgetStatus(userId, timeZone),
+    getAlertPrefs(userId),
+  ]);
   const budget = status.limit;
   if (budget <= 0) return null;
   const spent = status.spent;
 
+  // Month progress is measured in the user's own calendar, not the server's:
+  // on the 1st in Auckland it is still the previous month in UTC (§50).
   const now = new Date();
-  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-  const monthFrac = Math.max(now.getDate() / daysInMonth, 0.05);
+  const { year, month, day: dayOfMonth } = partsInZone(now, timeZone);
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const monthFrac = Math.max(dayOfMonth / daysInMonth, 0.05);
   const projected = spent / monthFrac;
   const usedFrac = spent / budget;
 
@@ -43,20 +52,20 @@ async function budgetPaceNudge(): Promise<Nudge | null> {
     return {
       id: "pace-over",
       tone: "warn",
-      title: `Over your budget by ${formatCurrency(spent - budget)}`,
+      title: `Over your budget by ${formatCurrency(subtractMoney(spent, budget))}`,
       body: `${formatCurrency(spent)} spent of ${formatCurrency(budget)} this month. Fixed bills aren't counted — this is the spending you control.`,
     };
   }
 
   // Half-mark alert: crossing 50% matters most when the month isn't half over.
   if (prefs.half && usedFrac >= 0.5 && usedFrac < 1) {
-    const daysLeft = daysInMonth - now.getDate();
+    const daysLeft = daysInMonth - dayOfMonth;
     if (monthFrac < 0.45) {
       return {
         id: "half-early",
         tone: "warn",
         title: "Halfway through your budget already",
-        body: `You crossed 50% of your ${formatCurrency(budget)} budget in ${now.getDate()} days — the month has ${daysLeft} days left. At this pace you'd hit about ${formatCurrency(projected)}.`,
+        body: `You crossed 50% of your ${formatCurrency(budget)} budget in ${dayOfMonth} days — the month has ${daysLeft} days left. At this pace you'd hit about ${formatCurrency(projected)}.`,
       };
     }
     if (monthFrac >= 0.45 && monthFrac <= 0.6 && usedFrac <= 0.6) {
@@ -104,16 +113,18 @@ async function budgetPaceNudge(): Promise<Nudge | null> {
 }
 
 // 2) Unusual big purchase: way above your usual size for that category.
-async function bigPurchaseNudge(): Promise<Nudge | null> {
+async function bigPurchaseNudge(userId: string): Promise<Nudge | null> {
   const recent = await prisma.transaction.findMany({
-    where: { date: { gte: daysAgo(7) }, amount: { gt: 50 }, owedBack: false },
-    include: { category: true },
+    where: { userId, date: { gte: daysAgo(7) }, amount: { gt: 50 }, owedBack: false },
+    include: { category: { select: { name: true, group: true } } },
     orderBy: { amount: "desc" },
+    take: 50,
   });
   for (const t of recent) {
     if (!t.category || t.category.group !== "expense") continue;
     const history = await prisma.transaction.aggregate({
       where: {
+        userId,
         categoryId: t.categoryId,
         date: { gte: daysAgo(90), lt: daysAgo(7) },
         amount: { gt: 0 },
@@ -135,12 +146,23 @@ async function bigPurchaseNudge(): Promise<Nudge | null> {
 }
 
 // 3) Day-pattern break: eating out on a day you usually don't.
-async function dayPatternNudge(): Promise<Nudge | null> {
-  const cat = await prisma.category.findUnique({ where: { name: "Food & Dining" } });
+async function dayPatternNudge(userId: string): Promise<Nudge | null> {
+  // Categories are per-user rows, so this looks up THIS user's "Food & Dining".
+  const cat = await prisma.category.findUnique({
+    where: { userId_name: { userId, name: "Food & Dining" } },
+    select: { id: true },
+  });
   if (!cat) return null;
 
   const history = await prisma.transaction.findMany({
-    where: { categoryId: cat.id, date: { gte: daysAgo(90), lt: daysAgo(7) }, amount: { gt: 0 } },
+    where: {
+      userId,
+      categoryId: cat.id,
+      date: { gte: daysAgo(90), lt: daysAgo(7) },
+      amount: { gt: 0 },
+    },
+    select: { date: true, amount: true },
+    take: 2000,
   });
   if (history.length < 10) return null;
 
@@ -155,8 +177,10 @@ async function dayPatternNudge(): Promise<Nudge | null> {
     .map((d) => DAY_NAMES[d.i]);
 
   const thisWeek = await prisma.transaction.findMany({
-    where: { categoryId: cat.id, date: { gte: daysAgo(7) }, amount: { gt: 15 } },
+    where: { userId, categoryId: cat.id, date: { gte: daysAgo(7) }, amount: { gt: 15 } },
+    select: { id: true, date: true, amount: true, name: true, merchantName: true },
     orderBy: { amount: "desc" },
+    take: 50,
   });
   for (const t of thisWeek) {
     const day = new Date(t.date).getDay();
@@ -173,11 +197,11 @@ async function dayPatternNudge(): Promise<Nudge | null> {
 }
 
 // 4) Stale reimbursement: someone's been owing you for a while.
-async function staleReimbursementNudge(): Promise<Nudge | null> {
-  const { outstanding } = await getReimbursements();
+async function staleReimbursementNudge(userId: string): Promise<Nudge | null> {
+  const { outstanding } = await getReimbursements(userId);
   const stale = outstanding.filter((i) => new Date(i.date) < daysAgo(14));
   if (!stale.length) return null;
-  const total = stale.reduce((s, i) => s + i.outstanding, 0);
+  const total = sumBy(stale, (i) => i.outstanding);
   const oldest = stale[stale.length - 1];
   return {
     id: "stale-reimb",
@@ -187,12 +211,13 @@ async function staleReimbursementNudge(): Promise<Nudge | null> {
   };
 }
 
-export async function getNudges(): Promise<Nudge[]> {
+/** Heads-up nudges for one user, computed from their own data only. */
+export async function getNudges(userId: string, timeZone: string): Promise<Nudge[]> {
   const results = await Promise.all([
-    budgetPaceNudge(),
-    bigPurchaseNudge(),
-    dayPatternNudge(),
-    staleReimbursementNudge(),
+    budgetPaceNudge(userId, timeZone),
+    bigPurchaseNudge(userId),
+    dayPatternNudge(userId),
+    staleReimbursementNudge(userId),
   ]);
   return results.filter((n): n is Nudge => n !== null).slice(0, 3);
 }

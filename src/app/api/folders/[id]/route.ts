@@ -1,30 +1,37 @@
-import { NextResponse } from "next/server";
+import { route, safeJson } from "@/lib/security/api";
 import { prisma } from "@/lib/prisma";
+import { requireOwned } from "@/lib/security/ownership";
+import { folderCreate } from "@/lib/validation";
 
-export async function GET(
-  _req: Request,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  const { id } = await params;
-  const folder = await prisma.folder.findUnique({
-    where: { id },
-    include: {
-      transactions: {
-        include: { category: true, account: { select: { name: true, mask: true } } },
-        orderBy: { date: "desc" },
-      },
-    },
-  });
-  if (!folder) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  return NextResponse.json(folder);
-}
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-// Deleting a folder frees its charges (folderId set null via relation).
-export async function DELETE(
-  _req: Request,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  const { id } = await params;
-  await prisma.folder.delete({ where: { id } }).catch(() => {});
-  return NextResponse.json({ ok: true });
-}
+export const PATCH = route(
+  { auth: "user", limits: ["write"], body: folderCreate },
+  async (ctx) => {
+    const id = ctx.params.id;
+    await requireOwned("folder", id, ctx.user.id, { select: { id: true } });
+    await prisma.folder.updateMany({
+      where: { id, userId: ctx.user.id },
+      data: { name: ctx.body.name },
+    });
+    const folder = await prisma.folder.findFirst({
+      where: { id, userId: ctx.user.id },
+      select: { id: true, name: true },
+    });
+    return safeJson(folder);
+  },
+);
+
+/**
+ * Delete a folder. Transactions filed in it are NOT deleted — the relation is
+ * onDelete: SetNull, so the charges survive and simply become unfiled. That
+ * is a deliberate retention choice: deleting a bookkeeping label must not
+ * destroy financial history (§67).
+ */
+export const DELETE = route({ auth: "user", limits: ["write"] }, async (ctx) => {
+  const id = ctx.params.id;
+  await requireOwned("folder", id, ctx.user.id, { select: { id: true } });
+  await prisma.folder.deleteMany({ where: { id, userId: ctx.user.id } });
+  return safeJson({ ok: true });
+});

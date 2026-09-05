@@ -1,49 +1,79 @@
-import { NextResponse } from "next/server";
+import { route, safeJson } from "@/lib/security/api";
 import { prisma } from "@/lib/prisma";
-import { monthRange } from "@/lib/queries";
+import { monthRangeInZone, partsInZone } from "@/lib/time";
+import { sumBy, subtractMoney, roundMoney } from "@/lib/money";
 
-// The business breakdown: everything scoped to accounts marked as business.
-// Earnings, expenses, net profit — this month and across recent months.
-export async function GET() {
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+/**
+ * The business breakdown — this user's accounts marked as business.
+ *
+ * Note the double scoping on the transaction query: `userId` AND an account
+ * id list that was itself derived from a userId-scoped query. The account ids
+ * come from our own database rather than the request, but the tenancy stays
+ * in the WHERE clause regardless (§7 defence in depth).
+ */
+export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
+  const { id: userId, timezone } = ctx.user;
+
   const accounts = await prisma.account.findMany({
-    where: { isBusiness: true },
-    include: { item: { select: { institutionName: true } } },
+    where: { userId, isBusiness: true },
+    select: {
+      id: true, name: true, mask: true, currentBalance: true,
+      item: { select: { institutionName: true } },
+    },
   });
   if (accounts.length === 0) {
-    return NextResponse.json({ accounts: [], configured: false });
+    return safeJson({ accounts: [], configured: false });
   }
+
   const ids = accounts.map((a) => a.id);
   const now = new Date();
-  const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 5, 1);
+  const { year, month } = partsInZone(now, timezone);
+  let startYear = year;
+  let startMonth = month - 5;
+  while (startMonth <= 0) { startMonth += 12; startYear -= 1; }
+  const sixMonthsAgo = monthRangeInZone(timezone, startYear, startMonth).start;
 
   const txns = await prisma.transaction.findMany({
-    where: { accountId: { in: ids }, date: { gte: sixMonthsAgo } },
-    include: { category: true },
+    where: { userId, accountId: { in: ids }, date: { gte: sixMonthsAgo } },
+    select: {
+      id: true, date: true, name: true, merchantName: true, amount: true,
+      category: { select: { name: true, icon: true, color: true, group: true } },
+    },
     orderBy: { date: "desc" },
+    take: 5000,
   });
 
   // Monthly earnings / expenses / net for the last 6 months.
   const months: { month: string; label: string; income: number; expenses: number; net: number }[] = [];
   for (let i = 5; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    const { start, end } = monthRange(d.getFullYear(), d.getMonth());
+    let mYear = year;
+    let mMonth = month - i;
+    while (mMonth <= 0) { mMonth += 12; mYear -= 1; }
+    const { start, end } = monthRangeInZone(timezone, mYear, mMonth);
     const inMonth = txns.filter((t) => t.date >= start && t.date < end);
-    const income = inMonth.filter((t) => t.amount < 0).reduce((s, t) => s - t.amount, 0);
-    const expenses = inMonth
-      .filter((t) => t.amount > 0 && t.category?.group !== "transfer")
-      .reduce((s, t) => s + t.amount, 0);
+    const income = sumBy(inMonth.filter((t) => t.amount < 0), (t) => -t.amount);
+    const expenses = sumBy(
+      inMonth.filter((t) => t.amount > 0 && t.category?.group !== "transfer"),
+      (t) => t.amount,
+    );
     months.push({
-      month: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`,
-      label: d.toLocaleDateString("en-US", { month: "short" }),
-      income: Math.round(income * 100) / 100,
-      expenses: Math.round(expenses * 100) / 100,
-      net: Math.round((income - expenses) * 100) / 100,
+      month: `${mYear}-${String(mMonth).padStart(2, "0")}`,
+      label: new Date(Date.UTC(mYear, mMonth - 1, 1)).toLocaleDateString("en-US", {
+        month: "short",
+        timeZone: "UTC",
+      }),
+      income,
+      expenses,
+      net: subtractMoney(income, expenses),
     });
   }
   const current = months[months.length - 1];
 
   // Top expense merchants this month + overall expense categories.
-  const { start: mStart } = monthRange(now.getFullYear(), now.getMonth());
+  const { start: mStart } = monthRangeInZone(timezone, year, month);
   const monthExpenses = txns.filter((t) => t.date >= mStart && t.amount > 0);
   const byMerchant = new Map<string, { total: number; count: number }>();
   for (const t of monthExpenses) {
@@ -54,11 +84,11 @@ export async function GET() {
     byMerchant.set(name, m);
   }
   const topExpenses = Array.from(byMerchant.entries())
-    .map(([name, v]) => ({ name, total: Math.round(v.total * 100) / 100, count: v.count }))
+    .map(([name, v]) => ({ name, total: roundMoney(v.total), count: v.count }))
     .sort((a, b) => b.total - a.total)
     .slice(0, 5);
 
-  return NextResponse.json({
+  return safeJson({
     configured: true,
     accounts: accounts.map((a) => ({
       id: a.id,
@@ -80,4 +110,4 @@ export async function GET() {
       color: t.category?.color ?? null,
     })),
   });
-}
+});

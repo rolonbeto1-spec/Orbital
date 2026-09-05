@@ -1,23 +1,31 @@
-import { NextResponse } from "next/server";
+import { route, safeJson } from "@/lib/security/api";
 import {
-  currentMonthRange,
-  monthRange,
   getCashflow,
   getSpendingByCategory,
   getMonthlyTrend,
   getNetWorth,
 } from "@/lib/queries";
+import { currentMonthRange, monthRangeInZone, partsInZone } from "@/lib/time";
 
-export async function GET() {
-  const { start, end } = currentMonthRange();
-  const prev = monthRange(start.getFullYear(), start.getMonth() - 1);
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+/**
+ * The Insights overview. Every figure is computed from the signed-in user's
+ * own transactions, over their own calendar months (§2, §50).
+ */
+export const GET = route({ auth: "user", limits: ["report"] }, async (ctx) => {
+  const { id: userId, timezone } = ctx.user;
+  const { start, end } = currentMonthRange(timezone);
+  const { year, month } = partsInZone(new Date(), timezone);
+  const prev = monthRangeInZone(timezone, month === 1 ? year - 1 : year, month === 1 ? 12 : month - 1);
 
   const [cashflow, byCategory, prevByCategory, trend, netWorth] = await Promise.all([
-    getCashflow(start, end),
-    getSpendingByCategory(start, end),
-    getSpendingByCategory(prev.start, prev.end),
-    getMonthlyTrend(6),
-    getNetWorth(),
+    getCashflow(userId, start, end),
+    getSpendingByCategory(userId, start, end),
+    getSpendingByCategory(userId, prev.start, prev.end),
+    getMonthlyTrend(userId, timezone, 6),
+    getNetWorth(userId),
   ]);
 
   // Attach a vs-last-month trend to each category. For spending, up = bad.
@@ -29,11 +37,12 @@ export async function GET() {
     return { ...c, prevTotal, pct };
   });
 
-  return NextResponse.json({
+  return safeJson({
     cashflow,
     byCategory: withTrend,
     trend,
     netWorth,
-    month: start.toLocaleDateString("en-US", { month: "long", year: "numeric" }),
+    // Rendered in the user's zone so the label matches the period it covers.
+    month: start.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: timezone }),
   });
-}
+});

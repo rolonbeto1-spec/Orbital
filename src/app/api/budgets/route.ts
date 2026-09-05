@@ -1,23 +1,46 @@
-import { NextResponse } from "next/server";
+import { route, safeJson } from "@/lib/security/api";
 import { prisma } from "@/lib/prisma";
-import { getBudgetsWithSpend } from "@/lib/queries";
+import { assertOwned } from "@/lib/security/ownership";
+import { budgetCreate } from "@/lib/validation";
 
-export async function GET() {
-  const budgets = await getBudgetsWithSpend();
-  return NextResponse.json({ budgets });
-}
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-// Create or update a budget for a category (one budget per category).
-export async function POST(req: Request) {
-  const { categoryId, amount } = await req.json();
-  if (!categoryId || typeof amount !== "number" || amount < 0) {
-    return NextResponse.json({ error: "categoryId and amount required" }, { status: 400 });
-  }
-  const budget = await prisma.budget.upsert({
-    where: { categoryId },
-    create: { categoryId, amount },
-    update: { amount },
-    include: { category: true },
+export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
+  const budgets = await prisma.budget.findMany({
+    where: { userId: ctx.user.id },
+    select: {
+      id: true, amount: true, categoryId: true,
+      category: { select: { id: true, name: true, icon: true, color: true, group: true } },
+    },
   });
-  return NextResponse.json(budget);
-}
+  return safeJson({ budgets });
+});
+
+/**
+ * Create or update a monthly limit for one of the user's categories.
+ *
+ * The category id is ownership-checked before use: without that, a request
+ * naming another tenant's category would create a budget row pointing across
+ * the tenant boundary (§7).
+ */
+export const POST = route(
+  { auth: "user", limits: ["write"], body: budgetCreate },
+  async (ctx) => {
+    await assertOwned("category", ctx.body.categoryId, ctx.user.id);
+
+    // Upsert on the unique categoryId. Two concurrent requests cannot create
+    // two budgets for one category (§48).
+    const budget = await prisma.budget.upsert({
+      where: { categoryId: ctx.body.categoryId },
+      create: {
+        userId: ctx.user.id,
+        categoryId: ctx.body.categoryId,
+        amount: ctx.body.amount,
+      },
+      update: { amount: ctx.body.amount },
+      select: { id: true, amount: true, categoryId: true },
+    });
+    return safeJson(budget);
+  },
+);

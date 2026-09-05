@@ -1,32 +1,32 @@
-import { NextResponse } from "next/server";
-import { plaidConfigured } from "@/lib/plaid";
-import { syncAllItems } from "@/lib/sync";
+import { z } from "zod";
+import { route, safeJson } from "@/lib/security/api";
+import { requireOwned } from "@/lib/security/ownership";
+import { syncItemForUser, syncAllItemsForUser } from "@/lib/sync";
 
-// Sync does real work (bank pull + AI sorting + logo passes) — give it a
-// full minute instead of the platform's ~10s default before it gets killed.
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-// Re-syncs balances and transactions for all connected banks.
-export async function POST() {
-  if (!plaidConfigured) {
-    return NextResponse.json(
-      { ok: false, demo: true, message: "Demo mode — no banks connected." },
-      { status: 200 }
-    );
+const body = z
+  .object({
+    // Optional: sync one connection. Ownership-checked before use, so a user
+    // cannot trigger a sync of somebody else's bank (§62).
+    itemId: z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/).optional(),
+  })
+  .strict();
+
+/**
+ * Refresh bank data for the signed-in user.
+ *
+ * POST only — it consumes Plaid quota and writes to the database, so it must
+ * not be reachable by a cross-site GET (§17).
+ */
+export const POST = route({ auth: "user", limits: ["plaidSync"], body }, async (ctx) => {
+  if (ctx.body.itemId) {
+    await requireOwned("item", ctx.body.itemId, ctx.user.id, { select: { id: true } });
+    const result = await syncItemForUser(ctx.body.itemId, ctx.user.id);
+    return safeJson(result);
   }
-  try {
-    const results = await syncAllItems();
-    const totals = results.reduce(
-      (acc, r) => ({
-        added: acc.added + r.added,
-        modified: acc.modified + r.modified,
-        removed: acc.removed + r.removed,
-      }),
-      { added: 0, modified: 0, removed: 0 }
-    );
-    return NextResponse.json({ ok: true, ...totals });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : "Sync failed";
-    return NextResponse.json({ ok: false, error: message }, { status: 500 });
-  }
-}
+  const result = await syncAllItemsForUser(ctx.user.id);
+  return safeJson(result);
+});

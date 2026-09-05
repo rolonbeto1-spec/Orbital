@@ -1,55 +1,61 @@
-import { NextResponse } from "next/server";
-import { ask } from "@/lib/assistant";
+import { route, safeJson } from "@/lib/security/api";
+import { assistantRequest } from "@/lib/validation";
 import { maybeAction } from "@/lib/assistant-actions";
-import { askLLM, llmConfigured, type ChatTurn } from "@/lib/assistant-llm";
+import { askLLM, llmConfigured } from "@/lib/assistant-llm";
+import { ask } from "@/lib/assistant";
+import { AiBudgetExceeded } from "@/lib/ai/guard";
+import { log } from "@/lib/security/logger";
 
-// The sort-my-transactions action runs several AI batches — give it a full
-// minute instead of the platform's ~10s default before it gets killed.
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-// Reports whether the natural-language upgrade is active (ANTHROPIC_API_KEY set).
-export async function GET() {
-  return NextResponse.json({ llm: llmConfigured() });
-}
+/**
+ * The Ask screen (§30-§33).
+ *
+ * Three layers, tried in order, exactly as before — but every layer is now
+ * handed the authenticated user and reads only that user's data:
+ *
+ *   1. deterministic actions (token-free, pattern-matched from the user's own
+ *      text — the model never chooses an action or its parameters);
+ *   2. Claude, with a snapshot built from this user's finances alone;
+ *   3. the built-in rule engine, so chat still answers when the AI is
+ *      unavailable, out of budget, or not configured.
+ *
+ * The response is plain text. It is rendered as text by the client, never as
+ * HTML — model output is untrusted data (§16).
+ */
+export const POST = route(
+  { auth: "user", limits: ["ai", "aiSustained"], body: assistantRequest },
+  async (ctx) => {
+    const question = ctx.body.message;
 
-export async function POST(req: Request) {
-  try {
-    const { question, history } = await req.json();
-    if (!question || typeof question !== "string") {
-      return NextResponse.json({ error: "Missing question" }, { status: 400 });
+    // Layer 1 — deterministic, free, and fully authorized server-side.
+    try {
+      const action = await maybeAction(ctx.user, question);
+      if (action) return safeJson({ ...action, source: "action" });
+    } catch (error) {
+      log.warn("Assistant action failed", { error });
     }
 
-    // Commands run first — deterministic, works with or without an API key.
-    const action = await maybeAction(question);
-    if (action) return NextResponse.json({ ...action, mode: "action" });
-
+    // Layer 2 — the model.
     if (llmConfigured()) {
       try {
-        const result = await askLLM(question, sanitizeHistory(history));
-        return NextResponse.json({ ...result, mode: "ai" });
-      } catch (err) {
-        // Bad key, network hiccup, rate limit — the rule engine still answers.
-        console.error("LLM assistant failed, falling back to rules:", err);
+        const answer = await askLLM(ctx.user, question);
+        return safeJson({ ...answer, source: "ai" });
+      } catch (error) {
+        if (error instanceof AiBudgetExceeded) {
+          // Out of allowance: fall through to the rule engine rather than
+          // failing. The user still gets an answer (§33 "graceful failure").
+          log.info("AI budget exhausted; using rule engine", { scope: error.scope });
+        } else {
+          log.warn("Assistant LLM failed; using rule engine", { error });
+        }
       }
     }
 
-    const result = await ask(question);
-    return NextResponse.json({ ...result, mode: "rules" });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : "Failed to answer";
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
-}
-
-function sanitizeHistory(history: unknown): ChatTurn[] {
-  if (!Array.isArray(history)) return [];
-  return history
-    .filter(
-      (t): t is ChatTurn =>
-        !!t &&
-        typeof t === "object" &&
-        (t.role === "user" || t.role === "bot") &&
-        typeof t.text === "string",
-    )
-    .slice(-8);
-}
+    // Layer 3 — never break chat.
+    const answer = await ask(ctx.user, question);
+    return safeJson({ ...answer, source: "rules" });
+  },
+);

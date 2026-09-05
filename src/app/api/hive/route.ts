@@ -1,10 +1,23 @@
-import { NextResponse } from "next/server";
+import { z } from "zod";
+import { route, safeJson } from "@/lib/security/api";
 import { getHive } from "@/lib/hive";
-import { ensureDemoData } from "@/lib/db-helpers";
 
-export async function GET(req: Request) {
-  await ensureDemoData();
-  const { searchParams } = new URL(req.url);
-  const hive = await getHive(searchParams.get("window"));
-  return NextResponse.json(hive);
-}
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+const query = z
+  .object({
+    // "35d" | "week" | "month" | "YYYY-MM". Bounded and pattern-checked so a
+    // hostile value cannot become an unbounded date range (§51).
+    window: z
+      .string()
+      .max(16)
+      .regex(/^(\d{1,3}d|week|month|\d{4}-\d{2})$/, "Invalid window")
+      .optional(),
+  })
+  .strict();
+
+export const GET = route({ auth: "user", limits: ["read"], query }, async (ctx) => {
+  const hive = await getHive(ctx.user.id, ctx.user.timezone, ctx.query.window ?? null);
+  return safeJson(hive);
+});

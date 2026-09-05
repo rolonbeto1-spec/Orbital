@@ -1,8 +1,17 @@
-import { NextResponse } from "next/server";
+import { route, safeJson } from "@/lib/security/api";
 import { detectRecurring } from "@/lib/recurring";
 
-export async function GET() {
-  const recurring = await detectRecurring();
-  const monthlyTotal = Math.round(recurring.reduce((s, r) => s + r.monthlyCost, 0) * 100) / 100;
-  return NextResponse.json({ recurring, monthlyTotal });
-}
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+/**
+ * Recurring-charge detection.
+ *
+ * Rate-limited on its own budget because it is one of the more expensive
+ * reads in the app: it scans six months of the user's transactions and does
+ * cadence analysis over them (§22, §72).
+ */
+export const GET = route({ auth: "user", limits: ["recurring"] }, async (ctx) => {
+  const recurring = await detectRecurring(ctx.user.id);
+  return safeJson({ recurring });
+});

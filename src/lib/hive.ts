@@ -1,7 +1,10 @@
+import "server-only";
 import { prisma } from "@/lib/prisma";
 import { NEEDS_CATEGORIES, WANTS_CATEGORIES } from "@/lib/buckets";
 import { getBudgetStatus, type BudgetStatus } from "@/lib/budget";
-import { getNetWorth, getCashflow, currentMonthRange } from "@/lib/queries";
+import { getNetWorth, getCashflow } from "@/lib/queries";
+import { currentMonthRange } from "@/lib/time";
+import { effectiveSpend, sumBy, roundMoney } from "@/lib/money";
 
 // Data for the honeycomb home screen: your money in the center, branching into
 // Needs / Wants / Investing / Rentals, each with satellite cells. Everything is
@@ -103,26 +106,48 @@ export function resolveWindow(spec?: string | null): HiveWindowSpec {
   return { start, end: endOfDay, prevStart, prevEnd: start, label: `Past ${WINDOW_DAYS} days` };
 }
 
-export async function getHive(windowSpec?: string | null) {
+/**
+ * The Hive, for one user.
+ *
+ * Every query is scoped to `userId`, so the honeycomb is built only from that
+ * person's transactions, categories, accounts and properties. Row counts are
+ * bounded: the window is at most a few months and the read is capped, so this
+ * endpoint cannot be turned into an unbounded scan (§51).
+ */
+const HIVE_MAX_ROWS = 6000;
+
+export async function getHive(
+  userId: string,
+  timeZone: string,
+  windowSpec?: string | null,
+) {
   const win = resolveWindow(windowSpec);
 
   const [txns, categories, accounts, properties] = await Promise.all([
     prisma.transaction.findMany({
-      where: { date: { gte: win.prevStart, lte: win.end }, account: { isBusiness: false } },
-      include: { category: true },
+      where: {
+        userId,
+        date: { gte: win.prevStart, lte: win.end },
+        account: { isBusiness: false },
+      },
+      include: { category: { select: { id: true, name: true, group: true } } },
+      take: HIVE_MAX_ROWS,
     }),
-    prisma.category.findMany(),
-    prisma.account.findMany(),
-    prisma.property.findMany({ orderBy: { createdAt: "asc" } }),
+    prisma.category.findMany({ where: { userId } }),
+    prisma.account.findMany({ where: { userId } }),
+    prisma.property.findMany({ where: { userId }, orderBy: { createdAt: "asc" } }),
   ]);
 
   const inWindow = txns.filter((t) => t.date >= win.start && t.date <= win.end);
   const inPrev = txns.filter((t) => t.date >= win.prevStart && t.date <= win.prevEnd);
 
+  // Summed in integer cents via sumBy, so a busy window does not accumulate
+  // float error across thousands of charges (§49).
   const spendOf = (list: typeof txns, name: string) =>
-    list
-      .filter((t) => t.category?.name === name && t.amount > 0)
-      .reduce((s, t) => s + (t.owedBack ? Math.max(0, t.amount - t.reimbursedAmount) : t.amount), 0);
+    sumBy(
+      list.filter((t) => t.category?.name === name && t.amount > 0),
+      (t) => (t.owedBack ? effectiveSpend(t.amount, t.reimbursedAmount) : t.amount),
+    );
 
   const catByName = new Map(categories.map((c) => [c.name, c]));
 
@@ -282,11 +307,11 @@ export async function getHive(windowSpec?: string | null) {
 
   // Budget takes center stage; total money becomes its own cell with an
   // up/down read from this month's net cashflow.
-  const { start: mStart, end: mEnd } = currentMonthRange();
+  const { start: mStart, end: mEnd } = currentMonthRange(timeZone);
   const [budget, netWorth, monthFlow] = await Promise.all([
-    getBudgetStatus(),
-    getNetWorth(),
-    getCashflow(mStart, mEnd),
+    getBudgetStatus(userId, timeZone),
+    getNetWorth(userId),
+    getCashflow(userId, mStart, mEnd),
   ]);
 
   return {
@@ -297,7 +322,7 @@ export async function getHive(windowSpec?: string | null) {
     money: {
       total: netWorth.netWorth,
       trueAvailable: netWorth.trueAvailable,
-      monthNet: Math.round(monthFlow.net),
+      monthNet: roundMoney(monthFlow.net),
     },
   };
 }

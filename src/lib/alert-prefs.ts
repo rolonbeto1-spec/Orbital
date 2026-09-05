@@ -1,9 +1,13 @@
-import { prisma } from "@/lib/prisma";
+import "server-only";
+import { getJsonSetting, setJsonSetting } from "@/lib/db-helpers";
 
-// Customizable budget reminders: which pace heads-ups the user wants.
-//  - half:   a note the moment you cross 50% of the budget (early if off-pace)
-//  - full:   a note when the budget is fully spent / exceeded
-//  - weekly: a "week N of M" pace check-in splitting the month into weeks
+/**
+ * Budget reminder preferences, per user.
+ *
+ * Stored in the (userId, key) Setting table. The old version used a single
+ * global "alertPrefs" key, which in a multi-tenant app would mean everyone
+ * shared one set of reminder preferences (§6).
+ */
 
 export interface AlertPrefs {
   half: boolean;
@@ -14,23 +18,17 @@ export interface AlertPrefs {
 const KEY = "alertPrefs";
 export const DEFAULT_PREFS: AlertPrefs = { half: true, full: true, weekly: false };
 
-export async function getAlertPrefs(): Promise<AlertPrefs> {
-  const row = await prisma.setting.findUnique({ where: { key: KEY } });
-  if (!row) return DEFAULT_PREFS;
-  try {
-    return { ...DEFAULT_PREFS, ...JSON.parse(row.value) };
-  } catch {
-    return DEFAULT_PREFS;
-  }
+export async function getAlertPrefs(userId: string): Promise<AlertPrefs> {
+  const stored = await getJsonSetting<Partial<AlertPrefs>>(userId, KEY, {});
+  return { ...DEFAULT_PREFS, ...stored };
 }
 
-export async function setAlertPrefs(prefs: Partial<AlertPrefs>): Promise<AlertPrefs> {
-  const current = await getAlertPrefs();
-  const next = { ...current, ...prefs };
-  await prisma.setting.upsert({
-    where: { key: KEY },
-    update: { value: JSON.stringify(next) },
-    create: { key: KEY, value: JSON.stringify(next) },
-  });
+export async function setAlertPrefs(
+  userId: string,
+  prefs: Partial<AlertPrefs>,
+): Promise<AlertPrefs> {
+  const current = await getAlertPrefs(userId);
+  const next: AlertPrefs = { ...current, ...prefs };
+  await setJsonSetting(userId, KEY, next);
   return next;
 }
