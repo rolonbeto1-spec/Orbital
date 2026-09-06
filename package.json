@@ -35,6 +35,7 @@
     "@anthropic-ai/sdk": "^0.116.0",
     "@prisma/client": "^6.19.3",
     "better-auth": "^1.7.2",
+    "clsx": "^2.1.1",
     "date-fns": "^4.4.0",
     "lucide-react": "^1.29.0",
     "next": "16.3.0",
@@ -44,6 +45,7 @@
     "react-plaid-link": "^5.0.0",
     "recharts": "^3.10.1",
     "server-only": "^0.0.1",
+    "tailwind-merge": "^3.6.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

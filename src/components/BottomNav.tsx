@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation";
 import { LayoutDashboard, ArrowLeftRight, Wallet, Sparkles, PieChart } from "lucide-react";
 
 const NAV = [
-  { href: "/", label: "Home", icon: LayoutDashboard },
+  { href: "/app", label: "Home", icon: LayoutDashboard },
   { href: "/transactions", label: "Activity", icon: ArrowLeftRight },
   { href: "/budgets", label: "Budgets", icon: Wallet },
   { href: "/chat", label: "Ask", icon: Sparkles },
@@ -14,7 +14,18 @@ const NAV = [
 
 export function BottomNav() {
   const pathname = usePathname();
-  if (pathname === "/login") return null; // no app chrome on the front door
+  // No app chrome on any page a signed-out visitor can reach: the landing
+  // page, the auth pages and the legal pages. A bottom navigation bar full of
+  // links to someone else's data is confusing at best on those screens.
+  const PUBLIC = [
+    "/",
+    "/login",
+    "/signup",
+    "/forgot-password",
+    "/reset-password",
+    "/verify-email",
+  ];
+  if (PUBLIC.includes(pathname) || pathname.startsWith("/legal")) return null;
 
   return (
     <nav
@@ -27,7 +38,7 @@ export function BottomNav() {
     >
       <div className="mx-auto grid w-full max-w-md grid-cols-5 px-2 py-2">
         {NAV.map(({ href, label, icon: Icon }) => {
-          const active = href === "/" ? pathname === "/" : pathname.startsWith(href);
+          const active = href === "/app" ? pathname === "/app" : pathname.startsWith(href);
           return (
             <Link
               key={href}

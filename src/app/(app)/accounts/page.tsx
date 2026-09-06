@@ -38,7 +38,7 @@ export default function AccountsPage() {
   return (
     <div>
       <header className="flex items-center gap-2 px-4 pb-2 pt-6">
-        <Link href="/" className="rounded-full p-2 active:bg-surface-2">
+        <Link href="/app" className="rounded-full p-2 active:bg-surface-2">
           <ChevronLeft size={22} />
         </Link>
         <h1 className="text-2xl font-bold tracking-tight">Accounts</h1>

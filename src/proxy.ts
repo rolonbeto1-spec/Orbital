@@ -39,7 +39,13 @@ const PUBLIC_PREFIXES = [
   "/api/health",
 ];
 
-/** The landing page is public; everything under /app is not. */
+/**
+ * "/" is the public marketing page; the signed-in dashboard lives at "/app".
+ *
+ * This used to be true while "/" actually rendered the dashboard, so a
+ * signed-out visitor was let through to an application shell whose every
+ * request came back 401.
+ */
 function isPublicPath(pathname: string): boolean {
   if (pathname === "/") return true;
   return PUBLIC_PREFIXES.some(
