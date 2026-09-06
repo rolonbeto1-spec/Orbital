@@ -1,7 +1,7 @@
 import { route, safeJson } from "@/lib/security/api";
 import { prisma } from "@/lib/prisma";
 import { monthRangeInZone, partsInZone } from "@/lib/time";
-import { sumCentsBy, serializeMoneyFields } from "@/lib/money";
+import { asCents, serializeMoney, sumCentsBy, serializeMoneyFields } from "@/lib/money";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -83,12 +83,12 @@ export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
 
   // Top expense merchants this month + overall expense categories.
   const { start: mStart } = monthRangeInZone(timezone, year, month);
-  const monthExpenses = txns.filter((t) => t.date >= mStart && t.amountCents > 0);
+  const monthExpenses = txns.filter((t) => t.date >= mStart && asCents(t.amountCents) > 0);
   const byMerchant = new Map<string, { total: number; count: number }>();
   for (const t of monthExpenses) {
     const name = t.merchantName || t.name;
     const m = byMerchant.get(name) ?? { total: 0, count: 0 };
-    m.total += t.amountCents;
+    m.total += asCents(t.amountCents);
     m.count++;
     byMerchant.set(name, m);
   }
@@ -104,7 +104,7 @@ export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
       name: a.name,
       mask: a.mask,
       bank: a.item.institutionName,
-      balance: a.currentBalanceCents / 100,
+      balance: serializeMoney(a.currentBalanceCents),
     })),
     thisMonth: current ? serializeMoneyFields(current) : null,
     months: months.map((m) => serializeMoneyFields(m)),
@@ -113,7 +113,7 @@ export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
       id: t.id,
       date: t.date,
       name: t.merchantName || t.name,
-      amount: t.amountCents / 100,
+      amount: serializeMoney(t.amountCents),
       category: t.category?.name ?? null,
       icon: t.category?.icon ?? null,
       color: t.category?.color ?? null,

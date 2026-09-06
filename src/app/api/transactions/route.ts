@@ -1,4 +1,5 @@
 import type { Prisma } from "@/generated/prisma";
+import { containsInsensitive } from "@/lib/db-search";
 import { route, safeJson } from "@/lib/security/api";
 import { prisma } from "@/lib/prisma";
 import { ownedBy } from "@/lib/security/ownership";
@@ -48,9 +49,9 @@ export const GET = route(
       // interpolated into SQL, and it is not compiled as a regex, so there is
       // no injection and no ReDoS surface (§15, §52).
       const or: Prisma.TransactionWhereInput[] = [
-        { name: { contains: search } },
-        { merchantName: { contains: search } },
-        { notes: { contains: search } },
+        { name: containsInsensitive(search) },
+        { merchantName: containsInsensitive(search) },
+        { notes: containsInsensitive(search) },
       ];
       // "44.74" or "$44.74" also finds the purchase by amount. With integer
       // cents this is an exact equality rather than the epsilon window a float

@@ -223,8 +223,8 @@ model Account {
   subtype          String?
   /// Integer cents. Positive = a positive balance; for a credit card this is
   /// the amount owed, matching Plaid.
-  currentBalanceCents   Int  @default(0)
-  availableBalanceCents Int?
+  currentBalanceCents   BigInt  @default(0)
+  availableBalanceCents BigInt?
   isBusiness       Boolean @default(false)
   currencyCode     String  @default("USD")
 
@@ -261,7 +261,7 @@ model Holding {
   priceUsd Float
 
   /// Integer cents. This is the monetary value that aggregations use.
-  valueCents Int
+  valueCents BigInt
 
   kind      String   @default("stock")
   updatedAt DateTime @updatedAt
@@ -281,7 +281,7 @@ model Transaction {
 
   /// Integer cents, Plaid convention: positive = money out (spending),
   /// negative = money in (income or refund).
-  amountCents   Int
+  amountCents   BigInt
   date          DateTime
   name          String
   merchantName  String?
@@ -296,7 +296,7 @@ model Transaction {
   owedBack              Boolean @default(false)
   /// Integer cents already paid back against this charge. Never exceeds
   /// amountCents; enforced in the API layer.
-  reimbursedAmountCents Int     @default(0)
+  reimbursedAmountCents BigInt     @default(0)
 
   folderId String?
   folder   Folder? @relation(fields: [folderId], references: [id], onDelete: SetNull)
@@ -358,8 +358,11 @@ model MerchantRule {
   categoryId String
   category   Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
   /// Amount-band bounds in integer cents. "$8 at Shell is snacks, $60 is fuel."
-  minAmountCents Int?
-  maxAmountCents Int?
+  /// NOT nullable, deliberately: an unbounded rule stores the sentinel bounds
+  /// from src/lib/money.ts rather than NULL, because NULLs never collide in a
+  /// unique index and would make the constraint below unenforceable.
+  minAmountCents BigInt @default(-9007199254740000)
+  maxAmountCents BigInt @default(9007199254740000)
   /// learned | builtin | ai — "learned" (the user's own correction) always wins.
   source     String   @default("learned")
 
@@ -367,7 +370,8 @@ model MerchantRule {
   updatedAt DateTime @updatedAt
 
   // One rule per (user, merchant match, amount band). Prevents the duplicate
-  // rules that concurrent syncs would otherwise create (§48).
+  // rules that concurrent syncs would otherwise create (§48). Enforceable only
+  // because the bound columns are NOT NULL — see their comment above.
   @@unique([userId, match, minAmountCents, maxAmountCents])
   @@index([userId, match])
 }
@@ -380,7 +384,7 @@ model Budget {
   categoryId String   @unique
   category   Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
   /// Monthly limit in integer cents.
-  amountCents Int
+  amountCents BigInt
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -395,12 +399,12 @@ model Property {
 
   name String
   /// All integer cents.
-  rentIncomeCents Int @default(0)
-  mortgageCents   Int @default(0)
-  utilitiesCents  Int @default(0)
-  hoaCents        Int @default(0)
-  sweatInCents    Int @default(0)
-  sweatOutCents   Int @default(0)
+  rentIncomeCents BigInt @default(0)
+  mortgageCents   BigInt @default(0)
+  utilitiesCents  BigInt @default(0)
+  hoaCents        BigInt @default(0)
+  sweatInCents    BigInt @default(0)
+  sweatOutCents   BigInt @default(0)
   notes String?
 
   createdAt DateTime @default(now())
@@ -416,8 +420,8 @@ model Goal {
 
   name String
   /// Integer cents.
-  targetAmountCents  Int
-  currentAmountCents Int       @default(0)
+  targetAmountCents  BigInt
+  currentAmountCents BigInt       @default(0)
   targetDate         DateTime?
   icon          String    @default("target")
   color         String    @default("#6366f1")

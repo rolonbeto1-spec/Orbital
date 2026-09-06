@@ -1,7 +1,14 @@
 import "server-only";
+import { containsInsensitive } from "@/lib/db-search";
 import { prisma } from "@/lib/prisma";
 import type { MerchantRule } from "@/generated/prisma";
-import { medianCents, asCents } from "@/lib/money";
+import {
+  medianCents,
+  asCents,
+  isUnboundedBand,
+  UNBOUNDED_MIN_CENTS,
+  UNBOUNDED_MAX_CENTS,
+} from "@/lib/money";
 
 /**
  * Merchant categorisation memory — now per user (§2, §6).
@@ -53,12 +60,12 @@ export function resolveSmartCategory(
   const matches = rules.filter((rule) => key.includes(rule.match));
   const bounded = matches.find(
     (rule) =>
-      (rule.minAmountCents != null || rule.maxAmountCents != null) &&
-      (rule.minAmountCents == null || amountCents >= rule.minAmountCents) &&
-      (rule.maxAmountCents == null || amountCents <= rule.maxAmountCents),
+      !isUnboundedBand(rule.minAmountCents, rule.maxAmountCents) &&
+      amountCents >= asCents(rule.minAmountCents) &&
+      amountCents <= asCents(rule.maxAmountCents),
   );
-  const unbounded = matches.find(
-    (rule) => rule.minAmountCents == null && rule.maxAmountCents == null,
+  const unbounded = matches.find((rule) =>
+    isUnboundedBand(rule.minAmountCents, rule.maxAmountCents),
   );
   const rule = bounded ?? unbounded;
   if (rule) return { categoryId: rule.categoryId };
@@ -94,13 +101,15 @@ export async function learnFromCorrection(
     const rules = await prisma.merchantRule.findMany({ where: { userId, match } });
     const band = rules.find(
       (rule) =>
-        (rule.minAmountCents != null || rule.maxAmountCents != null) &&
-        (rule.minAmountCents == null || amountCents >= rule.minAmountCents) &&
-        (rule.maxAmountCents == null || amountCents <= rule.maxAmountCents),
+        !isUnboundedBand(rule.minAmountCents, rule.maxAmountCents) &&
+        amountCents >= asCents(rule.minAmountCents) &&
+        amountCents <= asCents(rule.maxAmountCents),
     );
     if (band) {
-      await prisma.merchantRule.update({
-        where: { id: band.id },
+      // Scoped by userId as well as id: the rule was found inside this
+      // tenant, and the write states that rather than assuming it.
+      await prisma.merchantRule.updateMany({
+        where: { id: band.id, userId },
         data: { categoryId, source: "learned" },
       });
       return;
@@ -120,16 +129,16 @@ export async function learnFromCorrection(
               match,
               categoryId,
               source: "learned",
-              minAmountCents: low ? null : split.cutoffCents,
-              maxAmountCents: low ? split.cutoffCents : null,
+              minAmountCents: low ? UNBOUNDED_MIN_CENTS : split.cutoffCents,
+              maxAmountCents: low ? split.cutoffCents : UNBOUNDED_MAX_CENTS,
             },
             {
               userId,
               match,
               categoryId: split.otherCategoryId,
               source: "learned",
-              minAmountCents: low ? split.cutoffCents : null,
-              maxAmountCents: low ? null : split.cutoffCents,
+              minAmountCents: low ? split.cutoffCents : UNBOUNDED_MIN_CENTS,
+              maxAmountCents: low ? UNBOUNDED_MAX_CENTS : split.cutoffCents,
             },
           ],
         }),
@@ -139,31 +148,23 @@ export async function learnFromCorrection(
   }
 
   // One unbounded rule per (user, merchant); latest correction wins.
-  // upsert on the composite unique key rather than find-then-write, so two
-  // concurrent corrections cannot both insert (§48).
-  // Prisma's composite-unique input does not accept nulls, so the unbounded
-  // rule is found explicitly and then written. The create is guarded against
-  // a concurrent insert by the same unique constraint (§48).
-  const existing = await prisma.merchantRule.findFirst({
-    where: { userId, match, minAmountCents: null, maxAmountCents: null },
-    select: { id: true },
+  //
+  // A single atomic upsert on the composite unique key, rather than
+  // find-then-write. With sentinel bounds instead of NULLs the key is really
+  // unique, so N concurrent corrections converge on one row: the first
+  // inserts, the rest update (§48).
+  await prisma.merchantRule.upsert({
+    where: {
+      userId_match_minAmountCents_maxAmountCents: {
+        userId,
+        match,
+        minAmountCents: UNBOUNDED_MIN_CENTS,
+        maxAmountCents: UNBOUNDED_MAX_CENTS,
+      },
+    },
+    create: { userId, match, categoryId, source: "learned" },
+    update: { categoryId, source: "learned" },
   });
-  if (existing) {
-    await prisma.merchantRule.update({
-      where: { id: existing.id },
-      data: { categoryId, source: "learned" },
-    });
-    return;
-  }
-  await prisma.merchantRule
-    .create({ data: { userId, match, categoryId, source: "learned" } })
-    .catch(async () => {
-      // Lost a race: another request created it first. Apply our value.
-      await prisma.merchantRule.updateMany({
-        where: { userId, match, minAmountCents: null, maxAmountCents: null },
-        data: { categoryId, source: "learned" },
-      });
-    });
 }
 
 /**
@@ -178,15 +179,24 @@ export async function rememberAiCategory(
   const match = merchant.toLowerCase().trim().slice(0, 120);
   if (!match) return;
 
+  // Not an upsert: the update half must be conditional on source, and "never
+  // override a learned rule" cannot be expressed in an upsert's update clause.
+  // The updateMany carries `source: { not: "learned" }`, so the user's own
+  // correction survives even if it lands between this read and this write.
   const existing = await prisma.merchantRule.findFirst({
-    where: { userId, match, minAmountCents: null, maxAmountCents: null },
+    where: {
+      userId,
+      match,
+      minAmountCents: UNBOUNDED_MIN_CENTS,
+      maxAmountCents: UNBOUNDED_MAX_CENTS,
+    },
     select: { id: true, source: true },
   });
 
   if (existing) {
     if (existing.source === "learned") return; // never override the user
-    await prisma.merchantRule.update({
-      where: { id: existing.id },
+    await prisma.merchantRule.updateMany({
+      where: { id: existing.id, userId, source: { not: "learned" } },
       data: { categoryId, source: "ai" },
     });
     return;
@@ -194,7 +204,8 @@ export async function rememberAiCategory(
 
   await prisma.merchantRule
     .create({ data: { userId, match, categoryId, source: "ai" } })
-    // A concurrent sync may have created it first; that is fine.
+    // A concurrent sync may have created it first; that is fine, and the
+    // unique constraint is what makes losing this race harmless.
     .catch(() => undefined);
 }
 
@@ -211,7 +222,10 @@ async function findAmountSplit(
   const peers = await prisma.transaction.findMany({
     where: {
       userId, // scoped: never learns from another person's spending
-      OR: [{ merchantName: { contains: match } }, { name: { contains: match } }],
+      OR: [
+        { merchantName: containsInsensitive(match) },
+        { name: containsInsensitive(match) },
+      ],
       categoryId: { not: null },
       amountCents: { gt: 0 },
     },
@@ -223,7 +237,7 @@ async function findAmountSplit(
   for (const peer of peers) {
     if (!peer.categoryId || peer.categoryId === categoryId) continue;
     const amounts = byCategory.get(peer.categoryId) ?? [];
-    amounts.push(peer.amountCents);
+    amounts.push(asCents(peer.amountCents));
     byCategory.set(peer.categoryId, amounts);
   }
 

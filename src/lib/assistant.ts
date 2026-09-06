@@ -3,11 +3,9 @@ import { prisma } from "@/lib/prisma";
 import { getNetWorth } from "@/lib/queries";
 import { currentMonthRange, partsInZone, zonedTimeToUtc } from "@/lib/time";
 import type { AuthedUser } from "@/lib/security/session";
-import { formatCurrency as formatDollars } from "@/lib/format";
-import { centsToDollars, sumCentsBy } from "@/lib/money";
+import { formatCents } from "@/lib/format";
+import { asCents, dollarsToCents, sumCentsBy } from "@/lib/money";
 
-/** Answers are user-facing text, so cents become dollars at the format call. */
-const formatCurrency = (cents: number) => formatDollars(centsToDollars(cents));
 import { getBudgetStatus } from "@/lib/budget";
 
 // A small, deterministic question-answering engine over the user's finances.
@@ -111,12 +109,13 @@ async function spendIn(userId: string, names: string[] | null, start: Date, end:
     const group = t.category?.group ?? "expense";
     if (group !== "expense") continue; // exclude transfers/income
     if (names && !(t.category && names.includes(t.category.name))) continue;
-    total += t.amountCents;
+    const amountCents = asCents(t.amountCents);
+    total += amountCents;
     const cn = t.category?.name ?? "Other";
-    byCat[cn] = (byCat[cn] ?? 0) + t.amountCents;
+    byCat[cn] = (byCat[cn] ?? 0) + amountCents;
     const mn = t.merchantName || t.name;
     byMerchant[mn] = byMerchant[mn] || { total: 0, count: 0 };
-    byMerchant[mn].total += t.amountCents;
+    byMerchant[mn].total += amountCents;
     byMerchant[mn].count++;
   }
   return { total, byCat, byMerchant };
@@ -138,11 +137,11 @@ export async function ask(user: AuthedUser, question: string): Promise<Assistant
   if (/net worth|how much (money )?do i have|total balance|how much am i worth/.test(q)) {
     const nw = await getNetWorth(user.id);
     return {
-      answer: `Your net worth is ${formatCurrency(nw.netWorthCents)} — ${formatCurrency(nw.assetsCents)} in assets minus ${formatCurrency(nw.liabilitiesCents)} in debt.`,
+      answer: `Your net worth is ${formatCents(nw.netWorthCents)} — ${formatCents(nw.assetsCents)} in assets minus ${formatCents(nw.liabilitiesCents)} in debt.`,
       detail: [
-        { label: "Assets", value: formatCurrency(nw.assetsCents) },
-        { label: "Debt", value: formatCurrency(nw.liabilitiesCents) },
-        { label: "Net worth", value: formatCurrency(nw.netWorthCents) },
+        { label: "Assets", value: formatCents(nw.assetsCents) },
+        { label: "Debt", value: formatCents(nw.liabilitiesCents) },
+        { label: "Net worth", value: formatCents(nw.netWorthCents) },
       ],
     };
   }
@@ -158,7 +157,7 @@ export async function ask(user: AuthedUser, question: string): Promise<Assistant
       txns.filter((t) => t.category?.group === "income"),
       (t) => -t.amountCents,
     );
-    return { answer: `You brought in ${formatCurrency(income)} ${win.label}.` };
+    return { answer: `You brought in ${formatCents(income)} ${win.label}.` };
   }
 
   // budget pace (the user's customizable in-budget set)
@@ -171,12 +170,12 @@ export async function ask(user: AuthedUser, question: string): Promise<Assistant
     const over = remaining < 0;
     return {
       answer: over
-        ? `You're ${formatCurrency(-remaining)} over your budget this month — ${formatCurrency(total)} spent of a ${formatCurrency(budget)} target. (Only categories you count in your budget are included — bills and fixed costs stay out unless you add them.)`
-        : `You're on track: ${formatCurrency(total)} of your ${formatCurrency(budget)} budget this month, ${formatCurrency(remaining)} left. Only the categories you count are included.`,
+        ? `You're ${formatCents(-remaining)} over your budget this month — ${formatCents(total)} spent of a ${formatCents(budget)} target. (Only categories you count in your budget are included — bills and fixed costs stay out unless you add them.)`
+        : `You're on track: ${formatCents(total)} of your ${formatCents(budget)} budget this month, ${formatCents(remaining)} left. Only the categories you count are included.`,
       detail: [
-        { label: "Spent (in budget)", value: formatCurrency(total) },
-        { label: "Budget", value: formatCurrency(budget) },
-        { label: over ? "Over by" : "Left", value: formatCurrency(Math.abs(remaining)) },
+        { label: "Spent (in budget)", value: formatCents(total) },
+        { label: "Budget", value: formatCents(budget) },
+        { label: over ? "Over by" : "Left", value: formatCents(Math.abs(remaining)) },
       ],
     };
   }
@@ -186,20 +185,23 @@ export async function ask(user: AuthedUser, question: string): Promise<Assistant
   if (/save|saving|goal|afford/.test(q) && goalMatch) {
     let target = parseFloat(goalMatch[1].replace(/,/g, ""));
     if (goalMatch[2]) target *= 1000;
+    // The only dollars in this file: the user typed them. Convert once, here,
+    // so everything below is exact cents like the rest of the module.
+    const targetCents = dollarsToCents(target);
     const months = extractMonths(q);
-    if (target > 0 && months > 0) {
-      const perMonth = target / months;
+    if (targetCents > 0 && months > 0) {
+      const perMonthCents = Math.round(targetCents / months);
       return {
-        answer: `To reach ${formatCurrency(target)} in ${months} month${months > 1 ? "s" : ""}, save about ${formatCurrency(perMonth)} per month (${formatCurrency(perMonth / 4.33)} a week).`,
+        answer: `To reach ${formatCents(targetCents)} in ${months} month${months > 1 ? "s" : ""}, save about ${formatCents(perMonthCents)} per month (${formatCents(Math.round(perMonthCents / 4.33))} a week).`,
         detail: [
-          { label: "Goal", value: formatCurrency(target) },
+          { label: "Goal", value: formatCents(targetCents) },
           { label: "Timeframe", value: `${months} months` },
-          { label: "Per month", value: formatCurrency(perMonth) },
+          { label: "Per month", value: formatCents(perMonthCents) },
         ],
       };
     }
-    if (target > 0) {
-      return { answer: `To save ${formatCurrency(target)}, tell me your timeframe (e.g. "…by December" or "in 18 months") and I'll break it down per month.` };
+    if (targetCents > 0) {
+      return { answer: `To save ${formatCents(targetCents)}, tell me your timeframe (e.g. "…by December" or "in 18 months") and I'll break it down per month.` };
     }
   }
 
@@ -211,15 +213,15 @@ export async function ask(user: AuthedUser, question: string): Promise<Assistant
       const top = Object.entries(byMerchant).sort((a, b) => b[1].total - a[1].total).slice(0, 5);
       if (!top.length) return { answer: `No spending found ${win.label}.` };
       return {
-        answer: `Your top spots ${win.label}: ${top.slice(0, 3).map(([n, v]) => `${n} (${formatCurrency(v.total)})`).join(", ")}.`,
-        detail: top.map(([n, v]) => ({ label: n, value: formatCurrency(v.total) })),
+        answer: `Your top spots ${win.label}: ${top.slice(0, 3).map(([n, v]) => `${n} (${formatCents(v.total)})`).join(", ")}.`,
+        detail: top.map(([n, v]) => ({ label: n, value: formatCents(v.total) })),
       };
     }
     const top = Object.entries(byCat).sort((a, b) => b[1] - a[1]).slice(0, 5);
     if (!top.length) return { answer: `No spending found ${win.label}.` };
     return {
-      answer: `Your biggest category ${win.label} was ${top[0][0]} at ${formatCurrency(top[0][1])} — that's ${Math.round((top[0][1] / total) * 100)}% of the ${formatCurrency(total)} you spent.`,
-      detail: top.map(([n, v]) => ({ label: n, value: formatCurrency(v) })),
+      answer: `Your biggest category ${win.label} was ${top[0][0]} at ${formatCents(top[0][1])} — that's ${Math.round((top[0][1] / total) * 100)}% of the ${formatCents(total)} you spent.`,
+      detail: top.map(([n, v]) => ({ label: n, value: formatCents(v) })),
     };
   }
 
@@ -230,11 +232,11 @@ export async function ask(user: AuthedUser, question: string): Promise<Assistant
     if (cat) {
       const top = Object.entries(byMerchant).sort((a, b) => b[1].total - a[1].total).slice(0, 4);
       return {
-        answer: `You spent ${formatCurrency(total)} on ${cat.label} ${win.label}.`,
-        detail: top.map(([n, v]) => ({ label: `${n} · ${v.count}×`, value: formatCurrency(v.total) })),
+        answer: `You spent ${formatCents(total)} on ${cat.label} ${win.label}.`,
+        detail: top.map(([n, v]) => ({ label: `${n} · ${v.count}×`, value: formatCents(v.total) })),
       };
     }
-    return { answer: `You spent ${formatCurrency(total)} total ${win.label}.` };
+    return { answer: `You spent ${formatCents(total)} total ${win.label}.` };
   }
 
   // fallback

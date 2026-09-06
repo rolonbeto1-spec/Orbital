@@ -16,11 +16,13 @@
     "postinstall": "prisma generate",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:postgres": "scripts/test-postgres.sh",
     "test:security": "vitest run tests/tenant-isolation.test.ts tests/security-controls.test.ts tests/ai-isolation.test.ts",
     "typecheck": "tsc --noEmit",
     "db:test": "DATABASE_URL=file:./test.db prisma db push --skip-generate --accept-data-loss",
     "audit:secrets": "node scripts/scan-secrets.js",
     "check": "npm run typecheck && npm run lint && npm run test",
+    "check:full": "npm run check && npm run test:postgres",
     "db:migrate": "prisma migrate dev",
     "migrate:owner": "tsx scripts/migrate-owner-data.ts"
   },

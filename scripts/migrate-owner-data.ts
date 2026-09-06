@@ -35,7 +35,7 @@ import { PrismaClient } from "../src/generated/prisma";
 import { CATEGORIES } from "../src/lib/categories";
 import { encryptSecret } from "../src/lib/security/crypto";
 import { activeEncryptionKey } from "../src/lib/env";
-import { dollarsToCents } from "../src/lib/money";
+import { asCents, dollarsToCents } from "../src/lib/money";
 
 const prisma = new PrismaClient();
 
@@ -329,7 +329,7 @@ async function main(): Promise<void> {
     );
     const centsAgg = await prisma.transaction.aggregate({ _sum: { amountCents: true } });
     const expected = dollarsToCents(legacyTotal?.total ?? 0);
-    const actual = centsAgg._sum.amountCents ?? 0;
+    const actual = asCents(centsAgg._sum.amountCents ?? 0);
     console.log(`\nMoney check: legacy sum -> ${expected} cents, converted sum -> ${actual} cents`);
     if (Math.abs(expected - actual) > 1) {
       // A one-cent tolerance: summing floats and then rounding is not exactly

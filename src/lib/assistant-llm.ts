@@ -11,7 +11,7 @@ import { currentMonthRange, monthRangeInZone, partsInZone } from "@/lib/time";
 import { NEEDS_CATEGORIES, WANTS_CATEGORIES } from "@/lib/buckets";
 import { categoryInBudget } from "@/lib/budget";
 import { detectRecurring } from "@/lib/recurring";
-import { centsToDollars } from "@/lib/money";
+import { asCents, centsToDollars, type CentsLike } from "@/lib/money";
 import type { AssistantAnswer } from "@/lib/assistant";
 import type { AuthedUser } from "@/lib/security/session";
 import { askClaude, claimAiCall, untrusted, untrustedBlock } from "@/lib/ai/guard";
@@ -131,7 +131,7 @@ async function buildContext(user: AuthedUser): Promise<string> {
   // The model is given dollars, because a language model reasons about
   // "$84.21" far better than "8421 cents". This is the same display
   // conversion the HTTP boundary performs; no arithmetic happens after it.
-  const d = (cents: number) => centsToDollars(cents);
+  const d = (cents: CentsLike) => centsToDollars(cents);
   const day = (date: Date) => date.toISOString().slice(0, 10);
   // Merchant and account names come from banks and from the user; they are
   // the injection surface, so every one is scrubbed and bounded.
@@ -183,7 +183,10 @@ async function buildContext(user: AuthedUser): Promise<string> {
       utilities: d(p.utilitiesCents),
       hoa: d(p.hoaCents),
       monthly_net: d(
-        p.rentIncomeCents - p.mortgageCents - p.utilitiesCents - p.hoaCents,
+        asCents(p.rentIncomeCents) -
+          asCents(p.mortgageCents) -
+          asCents(p.utilitiesCents) -
+          asCents(p.hoaCents),
       ),
       sweat_equity_put_in: d(p.sweatInCents),
       sweat_equity_gotten_out: d(p.sweatOutCents),

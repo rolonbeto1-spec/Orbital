@@ -1,10 +1,9 @@
 import "server-only";
+import { containsInsensitive } from "@/lib/db-search";
 import { prisma } from "@/lib/prisma";
-import { formatCurrency as formatDollars } from "@/lib/format";
-import { centsToDollars, sumCentsBy } from "@/lib/money";
+import { formatCents } from "@/lib/format";
+import { asCents, sumCentsBy } from "@/lib/money";
 
-/** Action replies are user-facing text; cents become dollars at format time. */
-const formatCurrency = (cents: number) => formatDollars(centsToDollars(cents));
 import { getAlertPrefs, setAlertPrefs } from "@/lib/alert-prefs";
 import { CATEGORIES } from "@/lib/categories";
 import { learnFromCorrection } from "@/lib/smart-categorize";
@@ -104,28 +103,28 @@ export async function maybeAction(
     const byMerchant = new Map<string, number>();
     for (const t of txns) {
       const m = t.merchantName || t.name;
-      byMerchant.set(m, (byMerchant.get(m) ?? 0) + t.amountCents);
+      byMerchant.set(m, (byMerchant.get(m) ?? 0) + asCents(t.amountCents));
     }
     const topMerchants = [...byMerchant.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
 
     const kept = cashflow.incomeCents - cashflow.spendingCents;
     return {
       answer:
-        `This month: ${formatCurrency(cashflow.incomeCents)} came in, ${formatCurrency(cashflow.spendingCents)} went out — you kept ${formatCurrency(kept)}. ` +
+        `This month: ${formatCents(cashflow.incomeCents)} came in, ${formatCents(cashflow.spendingCents)} went out — you kept ${formatCents(kept)}. ` +
         (total > 0 && top.length > 0
-          ? `Most of it went to ${top[0].name} (${formatCurrency(top[0].totalCents)}, ${Math.round((top[0].totalCents / total) * 100)}% of spending). `
+          ? `Most of it went to ${top[0].name} (${formatCents(top[0].totalCents)}, ${Math.round((top[0].totalCents / total) * 100)}% of spending). `
           : "") +
         (recurringMonthly > 0
-          ? `Subscriptions and bills quietly take ${formatCurrency(recurringMonthly)}/mo — the Recurring tab in Insights lists them all.`
+          ? `Subscriptions and bills quietly take ${formatCents(recurringMonthly)}/mo — the Recurring tab in Insights lists them all.`
           : ""),
       detail: [
         ...top.map((c) => ({
           label: c.name,
-          value: `${formatCurrency(c.totalCents)}${total > 0 ? ` · ${Math.round((c.totalCents / total) * 100)}%` : ""}`,
+          value: `${formatCents(c.totalCents)}${total > 0 ? ` · ${Math.round((c.totalCents / total) * 100)}%` : ""}`,
         })),
         ...topMerchants.map(([m, v], i) => ({
           label: `Top merchant ${i + 1}: ${m}`,
-          value: formatCurrency(v),
+          value: formatCents(v),
         })),
       ],
     };
@@ -246,8 +245,8 @@ export async function maybeAction(
         ...(merchantQuery
           ? {
               OR: [
-                { merchantName: { contains: merchantQuery } },
-                { name: { contains: merchantQuery } },
+                { merchantName: containsInsensitive(merchantQuery) },
+                { name: containsInsensitive(merchantQuery) },
               ],
             }
           : {}),
@@ -273,7 +272,7 @@ export async function maybeAction(
     });
     const when = txn.date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
     return {
-      answer: `Saved it: ${txn.merchantName || txn.name} — ${formatCurrency(txn.amountCents)} on ${when} (${txn.account.name}) is now in the “${folder.name}” folder. Find it any time on the Folders screen.`,
+      answer: `Saved it: ${txn.merchantName || txn.name} — ${formatCents(txn.amountCents)} on ${when} (${txn.account.name}) is now in the “${folder.name}” folder. Find it any time on the Folders screen.`,
     };
   }
 

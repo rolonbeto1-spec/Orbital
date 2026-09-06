@@ -4,7 +4,7 @@ import { NEEDS_CATEGORIES, WANTS_CATEGORIES } from "@/lib/buckets";
 import { getBudgetStatus, type BudgetStatus } from "@/lib/budget";
 import { getNetWorth, getCashflow } from "@/lib/queries";
 import { currentMonthRange } from "@/lib/time";
-import { effectiveSpendCents, sumCentsBy } from "@/lib/money";
+import { asCents, effectiveSpendCents, sumCentsBy } from "@/lib/money";
 
 // Data for the honeycomb home screen: your money in the center, branching into
 // Needs / Wants / Investing / Rentals, each with satellite cells. Everything is
@@ -234,8 +234,8 @@ export async function getHive(
           : a.type === "investment"
             ? "TrendingUp"
             : "PiggyBank",
-      valueCents: a.currentBalanceCents,
-      balanceCents: a.currentBalanceCents,
+      valueCents: asCents(a.currentBalanceCents),
+      balanceCents: asCents(a.currentBalanceCents),
       trendGood: true,
       isBusiness: a.isBusiness,
     }))
@@ -244,30 +244,34 @@ export async function getHive(
 
   // Rentals: cells are houses; branch value is the monthly outflow they carry.
   const rentalItems: HiveItem[] = properties.map((p) => {
-    const netCents =
-      p.rentIncomeCents - p.mortgageCents - p.utilitiesCents - p.hoaCents;
+    // Each BIGINT column becomes a number once, at the read.
+    const rentIncomeCents = asCents(p.rentIncomeCents);
+    const mortgageCents = asCents(p.mortgageCents);
+    const utilitiesCents = asCents(p.utilitiesCents);
+    const hoaCents = asCents(p.hoaCents);
+    const netCents = rentIncomeCents - mortgageCents - utilitiesCents - hoaCents;
     return {
       id: `prop:${p.id}`,
       kind: "property" as const,
       name: p.name,
       icon: "Home",
       // A house with no rent still deserves a visible cell, hence the floor.
-      valueCents: Math.max(p.rentIncomeCents, 1),
+      valueCents: Math.max(rentIncomeCents, 1),
       trendGood: netCents >= 0,
       property: {
-        rentIncomeCents: p.rentIncomeCents,
-        mortgageCents: p.mortgageCents,
-        utilitiesCents: p.utilitiesCents,
-        hoaCents: p.hoaCents,
+        rentIncomeCents,
+        mortgageCents,
+        utilitiesCents,
+        hoaCents,
         netCents,
-        sweatInCents: p.sweatInCents,
-        sweatOutCents: p.sweatOutCents,
+        sweatInCents: asCents(p.sweatInCents),
+        sweatOutCents: asCents(p.sweatOutCents),
       },
     };
   });
   const rentalsOutflow = sumCentsBy(
     properties,
-    (p) => p.mortgageCents + p.utilitiesCents + p.hoaCents,
+    (p) => asCents(p.mortgageCents) + asCents(p.utilitiesCents) + asCents(p.hoaCents),
   );
 
   const branchesRaw: HiveBranch[] = [

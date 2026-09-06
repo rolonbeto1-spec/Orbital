@@ -181,7 +181,7 @@ export async function syncItemForUser(itemDbId: string, userId: string): Promise
   const accessToken = await accessTokenForOwnedItem(itemDbId, userId);
   if (!accessToken) return empty;
 
-  if (!(await claimSyncSlot(itemDbId))) {
+  if (!(await claimSyncSlot(itemDbId, userId))) {
     return { ...empty, skipped: "already-running" };
   }
 
@@ -230,11 +230,12 @@ export async function syncItemForUser(itemDbId: string, userId: string): Promise
 
       // Persist the cursor after every page. If the function is killed
       // mid-sync, the next run resumes rather than re-reading from scratch.
-      await prisma.item.update({ where: { id: itemDbId }, data: { cursor } });
+      // Scoped: the cursor is per-tenant state and the write says so.
+      await prisma.item.updateMany({ where: { id: itemDbId, userId }, data: { cursor } });
     }
 
-    await setItemStatusById(itemDbId, ITEM_STATUS.CONNECTED, null);
-    await releaseSyncSlot(itemDbId, null);
+    await setItemStatusById(itemDbId, userId, ITEM_STATUS.CONNECTED, null);
+    await releaseSyncSlot(itemDbId, userId, null);
 
     metric("plaid.sync.duration_ms", Date.now() - started, { outcome: "ok" });
     metric("plaid.sync.transactions", added + modified, {});
@@ -255,8 +256,8 @@ export async function syncItemForUser(itemDbId: string, userId: string): Promise
 
     // Record the *code*, never the error body — Plaid's error responses echo
     // the request, which contains the access token (§9, §12).
-    await setItemStatusById(itemDbId, status, code ?? null);
-    await releaseSyncSlot(itemDbId, code ?? "sync_failed");
+    await setItemStatusById(itemDbId, userId, status, code ?? null);
+    await releaseSyncSlot(itemDbId, userId, code ?? "sync_failed");
 
     metric("plaid.sync.duration_ms", Date.now() - started, { outcome: "error" });
     metric("plaid.sync.error", 1, { code: code ?? "unknown" });

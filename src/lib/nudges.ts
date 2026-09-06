@@ -3,11 +3,9 @@ import { prisma } from "@/lib/prisma";
 import { getReimbursements } from "@/lib/queries";
 import { getBudgetStatus } from "@/lib/budget";
 import { getAlertPrefs } from "@/lib/alert-prefs";
-import { formatCurrency as formatDollars, formatDateShort } from "@/lib/format";
+import { formatCents, formatDateShort } from "@/lib/format";
 
-/** Nudge text is user-facing, so cents are formatted as dollars here. */
-const formatCurrency = (cents: number) => formatDollars(centsToDollars(cents));
-import { sumCentsBy, centsToDollars } from "@/lib/money";
+import { asCents, sumCentsBy } from "@/lib/money";
 import { partsInZone } from "@/lib/time";
 
 // Proactive "heads up" messages: the app noticing things so you don't have to.
@@ -55,8 +53,8 @@ async function budgetPaceNudge(userId: string, timeZone: string): Promise<Nudge 
     return {
       id: "pace-over",
       tone: "warn",
-      title: `Over your budget by ${formatCurrency(spent - budget)}`,
-      body: `${formatCurrency(spent)} spent of ${formatCurrency(budget)} this month. Fixed bills aren't counted — this is the spending you control.`,
+      title: `Over your budget by ${formatCents(spent - budget)}`,
+      body: `${formatCents(spent)} spent of ${formatCents(budget)} this month. Fixed bills aren't counted — this is the spending you control.`,
     };
   }
 
@@ -68,7 +66,7 @@ async function budgetPaceNudge(userId: string, timeZone: string): Promise<Nudge 
         id: "half-early",
         tone: "warn",
         title: "Halfway through your budget already",
-        body: `You crossed 50% of your ${formatCurrency(budget)} budget in ${dayOfMonth} days — the month has ${daysLeft} days left. At this pace you'd hit about ${formatCurrency(projected)}.`,
+        body: `You crossed 50% of your ${formatCents(budget)} budget in ${dayOfMonth} days — the month has ${daysLeft} days left. At this pace you'd hit about ${formatCents(projected)}.`,
       };
     }
     if (monthFrac >= 0.45 && monthFrac <= 0.6 && usedFrac <= 0.6) {
@@ -76,7 +74,7 @@ async function budgetPaceNudge(userId: string, timeZone: string): Promise<Nudge 
         id: "half-pace",
         tone: "good",
         title: "Halfway through the month, halfway through the budget",
-        body: `${formatCurrency(spent)} of ${formatCurrency(budget)} used — right on pace.`,
+        body: `${formatCents(spent)} of ${formatCents(budget)} used — right on pace.`,
       };
     }
   }
@@ -91,8 +89,8 @@ async function budgetPaceNudge(userId: string, timeZone: string): Promise<Nudge 
       tone: offPace ? "warn" : "info",
       title: `Week ${week} of ${weeks}: ${Math.round(usedFrac * 100)}% of budget used`,
       body: offPace
-        ? `${formatCurrency(spent)} of ${formatCurrency(budget)} — a bit ahead of the calendar. About ${formatCurrency(budget - spent)} left for the rest of the month.`
-        : `${formatCurrency(spent)} of ${formatCurrency(budget)} — tracking with the calendar. ${formatCurrency(budget - spent)} left.`,
+        ? `${formatCents(spent)} of ${formatCents(budget)} — a bit ahead of the calendar. About ${formatCents(budget - spent)} left for the rest of the month.`
+        : `${formatCents(spent)} of ${formatCents(budget)} — tracking with the calendar. ${formatCents(budget - spent)} left.`,
     };
   }
 
@@ -101,7 +99,7 @@ async function budgetPaceNudge(userId: string, timeZone: string): Promise<Nudge 
       id: "pace-fast",
       tone: "warn",
       title: "You're not on pace to stay in budget",
-      body: `${formatCurrency(spent)} of your ${formatCurrency(budget)} budget is gone with ${daysInMonth - now.getDate()} days left — on track for about ${formatCurrency(projected)}.`,
+      body: `${formatCents(spent)} of your ${formatCents(budget)} budget is gone with ${daysInMonth - now.getDate()} days left — on track for about ${formatCents(projected)}.`,
     };
   }
   if (now.getDate() >= 10 && projected < budget * 0.85) {
@@ -109,7 +107,7 @@ async function budgetPaceNudge(userId: string, timeZone: string): Promise<Nudge 
       id: "pace-good",
       tone: "good",
       title: "On pace to come in under budget",
-      body: `Spending is tracking to about ${formatCurrency(projected)} against your ${formatCurrency(budget)} budget. Keep it up.`,
+      body: `Spending is tracking to about ${formatCents(projected)} against your ${formatCents(budget)} budget. Keep it up.`,
     };
   }
   return null;
@@ -140,8 +138,8 @@ async function bigPurchaseNudge(userId: string): Promise<Nudge | null> {
       return {
         id: `big-${t.id}`,
         tone: "info",
-        title: `What was the ${formatCurrency(t.amountCents)} at ${t.merchantName || t.name}?`,
-        body: `That's about ${Math.round(t.amountCents / avg)}× your usual ${t.category.name} purchase. If someone owes you for it, mark it "owed back" and it won't count against you.`,
+        title: `What was the ${formatCents(t.amountCents)} at ${t.merchantName || t.name}?`,
+        body: `That's about ${Math.round(asCents(t.amountCents) / avg)}× your usual ${t.category.name} purchase. If someone owes you for it, mark it "owed back" and it won't count against you.`,
       };
     }
   }
@@ -192,7 +190,7 @@ async function dayPatternNudge(userId: string): Promise<Nudge | null> {
         id: `day-${t.id}`,
         tone: "info",
         title: `${DAY_NAMES[day]} takeout is new for you`,
-        body: `${formatCurrency(t.amountCents)} at ${t.merchantName || t.name} on a ${DAY_NAMES[day]} — you usually eat out on ${usualDays.join(" and ")}. It digs into that budget.`,
+        body: `${formatCents(t.amountCents)} at ${t.merchantName || t.name} on a ${DAY_NAMES[day]} — you usually eat out on ${usualDays.join(" and ")}. It digs into that budget.`,
       };
     }
   }
@@ -209,8 +207,8 @@ async function staleReimbursementNudge(userId: string): Promise<Nudge | null> {
   return {
     id: "stale-reimb",
     tone: "info",
-    title: `Still owed ${formatCurrency(total)}`,
-    body: `${oldest.name} from ${formatDateShort(oldest.date)} is still ${formatCurrency(oldest.outstandingCents)} outstanding. Might be time for a nudge.`,
+    title: `Still owed ${formatCents(total)}`,
+    body: `${oldest.name} from ${formatDateShort(oldest.date)} is still ${formatCents(oldest.outstandingCents)} outstanding. Might be time for a nudge.`,
   };
 }
 

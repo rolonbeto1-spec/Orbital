@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { WANTS_CATEGORIES } from "@/lib/buckets";
 import { getSpendingByCategory } from "@/lib/queries";
 import { currentMonthRange } from "@/lib/time";
-import { sumCentsBy } from "@/lib/money";
+import { asCents, sumCentsBy } from "@/lib/money";
 
 /**
  * The budget, per user.
@@ -55,7 +55,7 @@ export async function getBudgetStatus(
     getSpendingByCategory(userId, start, end),
   ]);
 
-  const limitByCategory = new Map(budgets.map((b) => [b.categoryId, b.amountCents]));
+  const limitByCategory = new Map(budgets.map((b) => [b.categoryId, asCents(b.amountCents)]));
   const spentByCategory = new Map(spend.map((s) => [s.categoryId, s.totalCents]));
 
   const items: BudgetCategory[] = categories

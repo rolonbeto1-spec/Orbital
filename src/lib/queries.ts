@@ -102,14 +102,16 @@ export async function getCashflow(
 
   for (const transaction of transactions) {
     const group = transaction.category?.group ?? "expense";
-    if (group === "expense" && transaction.amountCents > 0) {
+    // asCents() at the read, once: amountCents arrives from a BIGINT column.
+    const amountCents = asCents(transaction.amountCents);
+    if (group === "expense" && amountCents > 0) {
       // A reimbursed purchase counts only for what it actually cost.
       spendingCents += transaction.owedBack
-        ? effectiveSpendCents(transaction.amountCents, transaction.reimbursedAmountCents)
-        : transaction.amountCents;
+        ? effectiveSpendCents(amountCents, transaction.reimbursedAmountCents)
+        : amountCents;
     }
-    if (group === "income" && transaction.amountCents < 0) {
-      incomeCents += -transaction.amountCents;
+    if (group === "income" && amountCents < 0) {
+      incomeCents += -amountCents;
     }
   }
 
@@ -149,7 +151,7 @@ export async function getSpendingByCategory(
 
     const spentCents = transaction.owedBack
       ? effectiveSpendCents(transaction.amountCents, transaction.reimbursedAmountCents)
-      : transaction.amountCents;
+      : asCents(transaction.amountCents);
     if (spentCents <= 0) continue;
 
     const existing = totals.get(category.id);
@@ -236,7 +238,7 @@ export async function getBudgetsWithSpend(userId: string, timeZone: string) {
       id: budget.id,
       categoryId: budget.categoryId,
       category: budget.category,
-      limitCents: budget.amountCents,
+      limitCents: asCents(budget.amountCents),
       spentCents: spentByCategory.get(budget.categoryId) ?? 0,
     }))
     // Guard the divide: a zero limit would otherwise sort as NaN/Infinity.

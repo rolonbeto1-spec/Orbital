@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { requireOwned, assertOwned, resolveOwnedRef } from "@/lib/security/ownership";
 import { transactionUpdate } from "@/lib/validation";
 import { learnFromCorrection } from "@/lib/smart-categorize";
-import { dollarsToCents, serializeMoneyFields } from "@/lib/money";
+import { asCents, dollarsToCents, serializeMoneyFields } from "@/lib/money";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -125,7 +125,7 @@ export const PATCH = route(
         ctx.user.id,
         updated.merchantName || updated.name,
         data.categoryId,
-        updated.amountCents,
+        asCents(updated.amountCents),
       );
     }
 

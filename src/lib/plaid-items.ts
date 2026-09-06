@@ -64,8 +64,11 @@ export async function upsertItemForUser(params: {
   }
 
   if (existing) {
-    await prisma.item.update({
-      where: { id: existing.id },
+    // updateMany scoped by BOTH id and userId. The ownership check above
+    // already rejected a foreign Item, but writing the scope into the query
+    // means the guarantee does not depend on that check staying in place.
+    await prisma.item.updateMany({
+      where: { id: existing.id, userId: params.userId },
       data: {
         accessTokenCipher: cipher,
         accessTokenKeyId: active.id,
@@ -152,14 +155,22 @@ export async function setItemStatus(
   });
 }
 
-/** Same, for the webhook path where the owner was resolved from the Item. */
+/**
+ * Set an Item's status on the webhook path.
+ *
+ * `userId` is REQUIRED even though the caller has just resolved the Item —
+ * it is the id the webhook handler read out of our own database, and passing
+ * it makes the write self-evidently scoped rather than scoped-by-convention.
+ * There is no id-only variant of this function on purpose.
+ */
 export async function setItemStatusById(
   itemId: string,
+  userId: string,
   status: ItemStatus,
   detail?: string | null,
 ): Promise<void> {
-  await prisma.item.update({
-    where: { id: itemId },
+  await prisma.item.updateMany({
+    where: { id: itemId, userId },
     data: { status, statusDetail: detail ?? null },
   });
 }
@@ -213,11 +224,12 @@ export async function listItemsForUser(userId: string) {
  * The 15-minute staleness window releases a lock left behind by a function
  * that was killed mid-sync.
  */
-export async function claimSyncSlot(itemId: string): Promise<boolean> {
+export async function claimSyncSlot(itemId: string, userId: string): Promise<boolean> {
   const staleBefore = new Date(Date.now() - 15 * 60 * 1000);
   const { count } = await prisma.item.updateMany({
     where: {
       id: itemId,
+      userId,
       OR: [{ syncStartedAt: null }, { syncStartedAt: { lt: staleBefore } }],
     },
     data: { syncStartedAt: new Date() },
@@ -225,9 +237,13 @@ export async function claimSyncSlot(itemId: string): Promise<boolean> {
   return count === 1;
 }
 
-export async function releaseSyncSlot(itemId: string, error?: string | null): Promise<void> {
-  await prisma.item.update({
-    where: { id: itemId },
+export async function releaseSyncSlot(
+  itemId: string,
+  userId: string,
+  error?: string | null,
+): Promise<void> {
+  await prisma.item.updateMany({
+    where: { id: itemId, userId },
     data: {
       syncStartedAt: null,
       lastSyncedAt: new Date(),

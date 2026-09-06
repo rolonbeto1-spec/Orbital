@@ -7,7 +7,7 @@ import { detectRecurring } from "@/lib/recurring";
 import { WANTS_CATEGORIES } from "@/lib/buckets";
 import { getBudgetCategoryNames } from "@/lib/budget";
 import { monthKey } from "@/lib/validation";
-import { sumCentsBy, serializeMoneyFields } from "@/lib/money";
+import { asCents, sumCentsBy, serializeMoneyFields } from "@/lib/money";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -97,13 +97,14 @@ export const GET = route({ auth: "user", limits: ["report"], query }, async (ctx
     if (t.category && t.category.group !== "expense") continue;
     const name = t.merchantName || t.name;
     const m = byMerchant.get(name) ?? { total: 0, count: 0 };
-    m.total += t.amountCents;
+    const amountCents = asCents(t.amountCents);
+    m.total += amountCents;
     m.count++;
     byMerchant.set(name, m);
-    if (!biggest || t.amountCents > biggest.amountCents) {
+    if (!biggest || amountCents > biggest.amountCents) {
       biggest = {
         name,
-        amountCents: t.amountCents,
+        amountCents,
         date: t.date,
         category: t.category?.name ?? null,
       };

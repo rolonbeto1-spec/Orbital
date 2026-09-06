@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
+import { asCents } from "@/lib/money";
 import { prisma, resetDatabase, createTenant, type TestUser } from "./fixtures";
 
 /**
@@ -279,7 +280,8 @@ describe("A cannot WRITE to B's records (IDOR)", () => {
     );
     expect(response.status).toBe(404);
     const after = await prisma.budget.findUniqueOrThrow({ where: { id: bob.budgetId } });
-    expect(after.amountCents).toBe(60_000);
+    // asCents(): money columns are BIGINT, so a raw read is a bigint.
+    expect(asCents(after.amountCents)).toBe(60_000);
   });
 
   it("POST /api/budgets cannot create a budget on B's category", async () => {
@@ -292,7 +294,7 @@ describe("A cannot WRITE to B's records (IDOR)", () => {
     const budgets = await prisma.budget.findMany({ where: { categoryId: bob.categoryId } });
     expect(budgets).toHaveLength(1);
     expect(budgets[0].userId).toBe(bob.id);
-    expect(budgets[0].amountCents).toBe(60_000);
+    expect(asCents(budgets[0].amountCents)).toBe(60_000);
   });
 
   it("PATCH /api/goals/:id on B's goal returns 404", async () => {

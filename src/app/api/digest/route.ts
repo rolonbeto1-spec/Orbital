@@ -1,7 +1,7 @@
 import { route, safeJson } from "@/lib/security/api";
 import { prisma } from "@/lib/prisma";
 import { weekRange } from "@/lib/time";
-import { sumCentsBy, effectiveSpendCents, serializeMoneyFields } from "@/lib/money";
+import { asCents, serializeMoney, sumCentsBy, effectiveSpendCents, serializeMoneyFields } from "@/lib/money";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -56,9 +56,10 @@ export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
 
   const byCategory = new Map<string, number>();
   for (const t of week) {
-    if (t.amountCents <= 0 || t.category?.group === "transfer") continue;
+    const amountCents = asCents(t.amountCents);
+    if (amountCents <= 0 || t.category?.group === "transfer") continue;
     const name = t.category?.name ?? "Not sorted yet";
-    byCategory.set(name, (byCategory.get(name) ?? 0) + t.amountCents);
+    byCategory.set(name, (byCategory.get(name) ?? 0) + amountCents);
   }
   const topCategories = [...byCategory.entries()]
     .sort((a, b) => b[1] - a[1])
@@ -66,8 +67,8 @@ export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
     .map(([name, total]) => ({ name, totalCents: total }));
 
   const biggest = week
-    .filter((t) => t.amountCents > 0 && t.category?.group !== "transfer")
-    .sort((a, b) => b.amountCents - a.amountCents)[0];
+    .filter((t) => asCents(t.amountCents) > 0 && t.category?.group !== "transfer")
+    .sort((a, b) => asCents(b.amountCents) - asCents(a.amountCents))[0];
 
   // Cents -> dollars once, here, for display (§49).
   return safeJson({
@@ -80,7 +81,7 @@ export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
     biggest: biggest
       ? {
           merchant: biggest.merchantName || biggest.name,
-          amount: biggest.amountCents / 100,
+          amount: serializeMoney(biggest.amountCents),
         }
       : null,
   });

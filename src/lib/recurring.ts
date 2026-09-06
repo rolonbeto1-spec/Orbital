@@ -1,6 +1,6 @@
 import "server-only";
 import { prisma } from "@/lib/prisma";
-import { medianCents, scaleCents } from "@/lib/money";
+import { asCents, medianCents, scaleCents } from "@/lib/money";
 
 // Detects merchants that charge on a schedule — subscriptions, bills, rent.
 // A merchant qualifies when it has 3+ charges at a near-regular interval
@@ -70,7 +70,7 @@ export async function detectRecurring(userId: string): Promise<RecurringCharge[]
     const medCents = medianCents(amounts);
     // Steady price: most charges within 20% of the median (or $3).
     const steady = amounts.filter(
-      (a) => Math.abs(a - medCents) <= Math.max(medCents * 0.2, 300),
+      (a) => Math.abs(asCents(a) - medCents) <= Math.max(medCents * 0.2, 300),
     );
     if (steady.length < 3) continue;
 

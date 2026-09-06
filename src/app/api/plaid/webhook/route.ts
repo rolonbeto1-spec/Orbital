@@ -133,7 +133,7 @@ export async function POST(request: Request): Promise<Response> {
       case "ITEM": {
         if (webhookCode === "ERROR") {
           const status = itemStatusForPlaidError(payload.error?.error_code);
-          await setItemStatusById(item.id, status, payload.error?.error_code ?? null);
+          await setItemStatusById(item.id, item.userId, status, payload.error?.error_code ?? null);
           await recordAudit({
             userId: item.userId,
             type: "plaid.item.error",
@@ -141,16 +141,16 @@ export async function POST(request: Request): Promise<Response> {
             meta: { itemId: item.id, code: payload.error?.error_code },
           });
         } else if (webhookCode === "PENDING_EXPIRATION" || webhookCode === "PENDING_DISCONNECT") {
-          await setItemStatusById(item.id, ITEM_STATUS.CONSENT_EXPIRED, webhookCode);
+          await setItemStatusById(item.id, item.userId, ITEM_STATUS.CONSENT_EXPIRED, webhookCode);
         } else if (webhookCode === "USER_PERMISSION_REVOKED" || webhookCode === "USER_ACCOUNT_REVOKED") {
-          await setItemStatusById(item.id, ITEM_STATUS.REVOKED, webhookCode);
+          await setItemStatusById(item.id, item.userId, ITEM_STATUS.REVOKED, webhookCode);
           await recordAudit({
             userId: item.userId,
             type: "plaid.item.revoked",
             meta: { itemId: item.id },
           });
         } else if (webhookCode === "LOGIN_REPAIRED" || webhookCode === "NEW_ACCOUNTS_AVAILABLE") {
-          await setItemStatusById(item.id, ITEM_STATUS.CONNECTED, null);
+          await setItemStatusById(item.id, item.userId, ITEM_STATUS.CONNECTED, null);
         }
         break;
       }
