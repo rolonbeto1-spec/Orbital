@@ -13,6 +13,7 @@ import { NotFoundError } from "./ownership";
 import { consumeRateLimit, clientIp, type RateLimitName } from "./rate-limit";
 import { log, newCorrelationId, metric } from "./logger";
 import { recordAudit } from "./audit";
+import { assertProductionSecrets } from "@/lib/env";
 
 /**
  * The one way to write an API route (§13).
@@ -111,6 +112,11 @@ export function route<TBody = undefined, TQuery = undefined>(
     const authMode = options.auth ?? "user";
 
     try {
+      // ---- 0. Configuration ------------------------------------------------
+      // Memoised; throws on the first request of a misconfigured production
+      // deployment rather than serving it (§28).
+      assertProductionSecrets();
+
       // ---- 1. Authenticate -------------------------------------------------
       let user: AuthedUser | null = null;
       if (authMode === "admin") user = await requireAdmin();

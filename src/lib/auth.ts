@@ -4,13 +4,7 @@ import { prismaAdapter } from "better-auth/adapters/prisma";
 import { nextCookies } from "better-auth/next-js";
 import { randomBytes } from "node:crypto";
 import { prisma } from "@/lib/prisma";
-import {
-  env,
-  isProduction,
-  appOrigin,
-  assertProductionSecrets,
-  signupAllowlist,
-} from "@/lib/env";
+import { env, isProduction, appOrigin, signupAllowlist } from "@/lib/env";
 import { sendMail, sendSecurityNotice } from "@/lib/mail";
 import { log } from "@/lib/security/logger";
 import { recordAudit } from "@/lib/security/audit";
@@ -31,9 +25,10 @@ import { provisionNewUser, purgeUserData } from "@/lib/account-lifecycle";
  * session signing are all the library's (§82).
  */
 
-// Fail fast on a misconfigured production deploy. This module is imported by
-// every authenticated path, so there is no way past it.
-assertProductionSecrets();
+// NOTE: the production-configuration check is NOT run here. It runs on the
+// first request, in src/lib/security/api.ts — see assertProductionSecrets().
+// Asserting at module load would fire during `next build`, when runtime
+// secrets are legitimately absent, and break the build rather than the deploy.
 
 /** Opaque, stable, non-PII reference handed to Plaid as client_user_id (§8). */
 function newPlaidUserRef(): string {

@@ -185,18 +185,40 @@ function productionProblems(): string[] {
 }
 
 /**
- * Throws in production when a required secret is missing. Imported by the
- * auth module, which every authenticated path loads, so there is no way to
- * serve traffic past a failed check.
+ * True while `next build` is compiling.
+ *
+ * Next sets NODE_ENV=production for the build itself, so "are we in
+ * production?" is not the same question as "are we serving production
+ * traffic?". Runtime secrets are frequently absent at build time by design —
+ * a CI build has no database URL and no email key — so the production
+ * assertion must not fire here.
  */
+function isBuildPhase(): boolean {
+  return process.env.NEXT_PHASE === "phase-production-build";
+}
+
+/**
+ * Throws when a required production secret is missing.
+ *
+ * Called on the first request rather than at module load, for the reason
+ * above: build time is the wrong moment to demand runtime configuration. The
+ * check is memoised, so it costs one comparison per instance after the first
+ * request, and a misconfigured deployment fails loudly on its very first
+ * request instead of silently serving a half-secured app.
+ */
+let productionCheckDone = false;
+
 export function assertProductionSecrets(): void {
-  if (!isProduction) return;
+  if (productionCheckDone) return;
+  if (!isProduction || isBuildPhase()) return;
+
   const problems = productionProblems();
   if (problems.length > 0) {
     throw new Error(
-      `Refusing to start: production configuration is incomplete.\n${problems.map((p) => `  - ${p}`).join("\n")}`,
+      `Refusing to serve: production configuration is incomplete.\n${problems.map((p) => `  - ${p}`).join("\n")}`,
     );
   }
+  productionCheckDone = true;
 }
 
 /** Non-throwing form, for the health endpoint and the launch checklist script. */
