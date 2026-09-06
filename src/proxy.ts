@@ -206,10 +206,15 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
 export const config = {
   matcher: [
     /*
-     * Everything except Next's own static output and the PWA files a phone
-     * needs before sign-in. Note that API routes ARE matched: they get the
-     * security headers, and the optimistic 401 above.
+     * Everything except Next's own static output and the site assets a
+     * browser fetches before anyone has signed in. Note that API routes ARE
+     * matched: they get the security headers, and the optimistic 401 above.
+     *
+     * `icon.svg` and `apple-touch-icon.png` are on this list because they were
+     * missing from it: the proxy redirected them to /login for every
+     * signed-out visitor, so the site icon failed to load on the landing page
+     * and the login page. They are public files with no user data in them.
      */
-    "/((?!_next/static|_next/image|favicon\\.ico|manifest\\.webmanifest|sw\\.js|icons/).*)",
+    "/((?!_next/static|_next/image|favicon\\.ico|icon\\.svg|apple-touch-icon\\.png|manifest\\.webmanifest|sw\\.js|icons/).*)",
   ],
 };

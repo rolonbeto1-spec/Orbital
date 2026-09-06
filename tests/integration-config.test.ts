@@ -207,6 +207,47 @@ describe("Proxy behaviour behind a production proxy (§19, §55)", () => {
     }
   });
 
+  it("does not gate the public site assets behind sign-in", async () => {
+    // The matcher excluded `icons/` but not `icon.svg` or
+    // `apple-touch-icon.png`, so the proxy redirected them to /login for
+    // every signed-out visitor and the site icon failed to load on the
+    // landing page and the login page. A real browser found this; the source
+    // looked fine.
+    //
+    // Backslashes are stripped first: the matcher is a regex written inside a
+    // string literal, so `icon.svg` appears there as `icon\\.svg`.
+    const matcher = proxySource
+      .slice(proxySource.indexOf("matcher"))
+      .replace(/\\/g, "");
+
+    for (const asset of [
+      "favicon.ico",
+      "icon.svg",
+      "apple-touch-icon.png",
+      "manifest.webmanifest",
+      "sw.js",
+      "icons/",
+    ]) {
+      expect(matcher, `${asset} is not excluded from the proxy matcher`).toContain(asset);
+    }
+  });
+
+  it("keeps the dashboard off the public path list", async () => {
+    // "/" is the marketing page and "/app" is the dashboard. If "/app" ever
+    // became public, the proxy would wave through every signed-out visitor.
+    const { proxy } = await import("@/proxy");
+    const { NextRequest } = await import("next/server");
+    for (const path of ["/app", "/transactions", "/accounts", "/api/hive"]) {
+      const response = await proxy(
+        new NextRequest(new Request(`https://metta.test${path}`)),
+      );
+      expect(
+        [302, 307, 401],
+        `${path} was not gated (status ${response.status})`,
+      ).toContain(response.status);
+    }
+  });
+
   it("hands the nonce to the renderer on every path, not just private ones", async () => {
     // `'strict-dynamic'` makes 'self' and every host-source be ignored for
     // scripts, so a script with no nonce is a blocked script. Next stamps the
