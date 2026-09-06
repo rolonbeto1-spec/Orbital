@@ -130,6 +130,38 @@ Verify by triggering a password-reset email to an address you control.
 
 ---
 
+## 7. Credentials leaked in the predecessor repository — ROTATE
+
+These are not Metta secrets and Metta does not use them, but they were
+committed in cleartext and must be treated as compromised.
+
+`rolonbeto1-spec/bull-trader` (the single-user application this rebuild came
+from) committed a real `.env` in commit `1fa2ee2` on 2026-04-29 and removed it
+in `db04748` on 2026-08-11. The file is still present in that repository's
+history and in every clone and fork of it. Affected names:
+
+| Name | Provider | Action |
+|---|---|---|
+| `ALPACA_API_KEY` | Alpaca | Revoke and reissue |
+| `ALPACA_SECRET_KEY` | Alpaca | Revoke and reissue |
+| `FINNHUB_API_KEY` | Finnhub | Revoke and reissue |
+
+The values are deliberately not recorded in this or any other document.
+
+Two things this is not:
+
+* **Not fixed by the deletion.** The keys were public for about three and a
+  half months and remain in history. Anyone who cloned in that window has them.
+* **Not fixed by rewriting history.** A force-pushed rewrite changes what new
+  clones see; it does not un-read what was already read. Rewrite if you like,
+  but rotate regardless.
+
+Rotate even though the Alpaca account is paper-trading: the key-id shape
+cannot be assumed to be paper-only, and providers frequently issue one
+credential pair that spans environments.
+
+---
+
 ## After any rotation
 
 1. `GET /api/health` returns `{"status":"ok","database":true}`.

@@ -277,19 +277,82 @@ not hand-rolled offsets. Tested across a DST transition and a year boundary.
 
 ## 10. Dependency findings
 
-`npm audit` at the time of writing: **4 high**, 0 critical.
+`npm audit`: **3 high**, 0 critical (was 4; `nanoid` fixed by `npm audit fix`).
 
 | Advisory | Package | Path | Assessment |
 |---|---|---|---|
-| GHSA-ggr8-5vv4-36mx (stack exhaustion) | `deepmerge-ts` | `prisma` → `@prisma/config` | **Build-time only.** Not in any request path. The fix requires downgrading Prisma, which is worse. |
-| GHSA-2v37-7h3g-55p8 (infinite loop with size 0) | `nanoid` | transitive | Not called with a zero size by any code here. |
+| GHSA-2v37-7h3g-55p8 (infinite loop when size is 0) | `nanoid` | `postcss` → `next`, `@tailwindcss/postcss` | **Fixed.** Patched in place; no code here calls it with a zero size. |
+| DeepmergeTS stack exhaustion | `deepmerge-ts` | `@prisma/client` → `prisma` → `@prisma/config` | **Open, no fix available.** See below. |
 
-Neither is reachable from a request. Both should be cleared when upstream
-publishes compatible versions. **Not treated as launch blockers**, and that
-judgement is recorded here so it can be challenged.
+On the remaining advisory, the earlier assessment above was imprecise and is
+corrected here:
+
+* It is **in the production dependency tree**, not only the dev tree —
+  `@prisma/client` (a runtime dependency) depends on `prisma`, which depends
+  on `@prisma/config`. The previous "build-time only" wording was wrong at the
+  dependency level.
+* It is nevertheless **not bundled into the served application**. Checking the
+  built output: `deepmerge-ts` appears in no built JavaScript file, and the
+  only occurrence of `@prisma/config` is a version string inside a package
+  metadata blob in the generated client — not a require. The vulnerable code
+  path is the Prisma CLI's config-file merger, reached only when the CLI reads
+  `prisma.config.ts`, a file the operator controls.
+* **There is no fixed release to upgrade to.** The advisory covers
+  `deepmerge-ts <8.0.0`, and the current Prisma 7.10.0 still pins 7.1.5.
+  `npm audit fix --force` proposes *downgrading* Prisma 6.19.3 → 6.12.0, which
+  is both older and incompatible with this schema. Downgrading was rejected.
+
+**Not a launch blocker**, for the reasons above, and the judgement is recorded
+so it can be challenged. Re-check when Prisma ships a release depending on
+`deepmerge-ts >= 8`.
 
 Supply-chain posture: lockfile committed; CI uses `npm ci`; no JWT library (Node
 crypto); no email SDK (`fetch`); `npm audit --audit-level=high` blocks CI.
+
+### Secrets in git history
+
+`npm run audit:secrets` checks the working tree, which is the wrong question
+for a credential: removing a secret from HEAD does not remove it from the
+repository. `npm run audit:secrets:history` walks every blob in every ref.
+Neither tool ever prints a matched value.
+
+**This repository (`Orbital`) is clean:** 9 commits, 537 blobs, no credential.
+The only matches are documented placeholders (`.env.example` templates) and
+deliberately fake test fixtures. No `.env` file has ever been committed, and
+`.env*` is gitignored.
+
+**The predecessor repository is not.** `rolonbeto1-spec/bull-trader`, the
+single-user application this rebuild came from, committed a real `.env`:
+
+| | |
+|---|---|
+| Added | commit `1fa2ee2`, 2026-04-29, *"Add API keys for Alpaca paper trading"* |
+| Removed | commit `db04748`, 2026-08-11 |
+| Exposed | `ALPACA_API_KEY` (live key-id shape), `ALPACA_SECRET_KEY`, `FINNHUB_API_KEY` |
+| Still in history | **Yes** — permanently, in every clone and fork |
+
+The values are deliberately not reproduced here, in this or any other
+document.
+
+Assessment: these are **market-data and paper-trading credentials, not
+banking, Plaid, or Metta credentials**. Metta does not use them; the trading
+feature they belonged to was deleted. So they are not a route into any user's
+financial data, and they are **not a launch blocker for Metta**.
+
+**Rotation is nonetheless mandatory**, and is not optional because the keys
+were removed from HEAD. They were public for roughly three and a half months
+and remain readable in the history of every clone. Treat them as compromised:
+
+1. Revoke and reissue the Alpaca key pair and the Finnhub key in those
+   providers' dashboards.
+2. Do this even if the Alpaca account is paper-trading only — the same
+   credentials often carry over to a live account, and the key-id shape
+   recorded above cannot be assumed to be paper-only.
+3. Rewriting `bull-trader`'s history is *not* a substitute for rotation and
+   should not be used as one. Assume anything ever pushed has been read.
+
+Tracked as a mandatory item in `PRODUCTION_LAUNCH_CHECKLIST.md` and
+`SECRET_ROTATION.md`.
 
 ---
 

@@ -22,6 +22,7 @@
     "db:test": "DATABASE_URL=file:./test.db prisma db push --skip-generate --accept-data-loss",
     "audit:secrets": "node scripts/scan-secrets.js",
     "audit:headers": "scripts/check-headers.sh",
+    "audit:secrets:history": "node scripts/scan-secrets-history.js",
     "check": "npm run typecheck && npm run lint && npm run test",
     "check:full": "npm run check && npm run test:postgres",
     "db:migrate": "prisma migrate dev",

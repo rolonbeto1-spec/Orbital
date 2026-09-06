@@ -72,6 +72,29 @@ signup stays off until this is cleared.
 > Until this is done there is production financial data that the new schema does
 > not correctly own. §66 is explicit: no public signup before this.
 
+### LB-1b — Rotate the credentials leaked in the predecessor repo **MANDATORY**
+
+Not a Metta blocker — these are market-data and paper-trading keys, not
+banking or Plaid credentials, and Metta does not use them. It is listed here
+because it must not be forgotten, and because "we deleted the file" is not
+rotation.
+
+`rolonbeto1-spec/bull-trader` committed a real `.env` in commit `1fa2ee2`
+(2026-04-29) and removed it in `db04748` (2026-08-11). It is still readable in
+the history of every clone and fork of that repository.
+
+- [ ] `ALPACA_API_KEY` revoked and reissued
+- [ ] `ALPACA_SECRET_KEY` revoked and reissued
+- [ ] `FINNHUB_API_KEY` revoked and reissued
+- [ ] Done even though the Alpaca account is paper-trading — the key-id shape
+      cannot be assumed to be paper-only, and key pairs often carry over
+- [ ] Confirmed that rewriting history was **not** used as a substitute for
+      rotation (assume anything ever pushed has been read)
+
+This repository's own history is clean: `npm run audit:secrets:history`
+reports no credential across all commits, and no `.env` has ever been
+committed here.
+
 ### LB-2 — Real secrets set in production **BLOCKER**
 - [ ] `BETTER_AUTH_SECRET` generated (48 bytes) and set
 - [ ] `ENCRYPTION_KEY_V1` generated (32 bytes) and set
