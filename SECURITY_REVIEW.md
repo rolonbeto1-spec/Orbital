@@ -456,3 +456,36 @@ is not a penetration test, not a compliance certification, and not a substitute
 for either. **Metta should not be described as "secure" on the strength of this
 document.** An independent human security review is recommended before
 meaningful user adoption (§77).
+
+---
+
+## 17. What the second review pass changed about confidence
+
+The second pass found fifteen defects in code this document had already
+assessed. Four of them were critical, and every one had passed a fully green
+test suite:
+
+- money columns that could not store a large balance on PostgreSQL at all;
+- a unique constraint that permitted unlimited duplicates;
+- a Content-Security-Policy that blocked every script on every page, in
+  production only;
+- an owner-migration script that could not run, and would have destroyed the
+  money columns if the auto-generated migration had been used.
+
+Detail in `METTA_PRODUCTION_HANDOFF.md` §22.
+
+**The conclusion is not that the suite is now sufficient.** It is that a review
+performed by the author of the code finds mechanical faults and misses shared
+assumptions, and that a green suite is evidence about the tests, not about the
+system. The following stay open and **must not be downgraded on the strength of
+test coverage**:
+
+| Open item | Why no amount of testing closes it |
+|---|---|
+| Independent security review | Nobody outside this work has read a line of it |
+| Real production-owner migration | Rehearsed against a fixture only; the real database is unmigrated and no backup restore has been tested |
+| Genuine Plaid webhook verification | The signature path is tested against constructed inputs. **No real webhook from Plaid has ever been verified.** |
+| Real backup restoration | Never performed |
+| Live headers and CSP on the real domain | Verified on a local production build over HTTP — not the live origin, not a browser, not with Plaid Link loaded |
+| Edge cache isolation with two live users | Verified in-process, not at Vercel's edge |
+| Anything needing production credentials | Not available to this work |

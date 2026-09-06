@@ -32,17 +32,23 @@ that cannot reach across tenants, and a test suite whose job is to attack it.
 - **AI.** One entry point, no tools passed to the model, an explicit projection
   of one tenant's data, verdicts validated against the caller's own ids, and
   per-user plus global spend ceilings.
-- **Verification.** 134 automated tests, all against a real database.
+- **Money.** Every currency amount is an exact integer number of cents in a
+  `BIGINT` column. No floating-point value is persisted anywhere.
+- **Verification.** 280 automated tests, all against a real database, run on
+  **both** SQLite and PostgreSQL.
 
-**Two real bugs were found by the tests and fixed:** `toCents(1.005)` was losing
-a cent to float representation, and a blank environment variable coerced to `0`,
-which would have silently switched the AI off.
+**A second review pass found fifteen further defects, and they are the reason
+this document should be read carefully rather than skimmed.** Three of them
+were invisible to a green test suite because the suite only ran on SQLite, and
+one of them — a Content-Security-Policy that blocked every script on every page
+— would have made the application a blank screen in production and nowhere
+else. Full detail in §22.
 
-**Public registration ships disabled.** Twelve launch blockers remain, listed in
-§18. The most important is that no one independent has reviewed any of this.
+**Public registration ships disabled.** Thirteen launch blockers remain, listed
+in §18. **Nothing in §18 was cleared by this pass**, and the most important
+remains that no one independent has reviewed any of this.
 
-**Statistics:** 97 files changed, +8,557 / −1,581 lines. 42 API routes. 4 test
-suites, 134 tests.
+**Statistics:** 42 API routes. 11 test suites, 280 tests.
 
 ---
 
@@ -625,8 +631,15 @@ controls work. That is a different claim.
 
 ## 18. Launch Blockers
 
-**PUBLIC SIGNUPS MUST REMAIN DISABLED** until all twelve are cleared. Full detail
-in PRODUCTION_LAUNCH_CHECKLIST.md.
+**PUBLIC SIGNUPS MUST REMAIN DISABLED** until all thirteen are cleared. Full
+detail in PRODUCTION_LAUNCH_CHECKLIST.md.
+
+**None of these were cleared by the second review pass**, and none should be
+downgraded because the test suite is now larger. A test proves that the code
+does what the test says; it does not prove that production is configured, that
+a real Plaid webhook validates, that a backup restores, or that somebody
+independent has looked. Those are the blockers, and they stay open by
+construction.
 
 | # | Blocker |
 |---|---|
@@ -642,6 +655,7 @@ in PRODUCTION_LAUNCH_CHECKLIST.md.
 | LB-10 | Cache isolation confirmed at the edge with two live users |
 | LB-11 | Branch protection, secret scanning, Dependabot enabled |
 | LB-12 | **Independent penetration test** |
+| LB-1b | Rotate `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `FINNHUB_API_KEY` — committed in cleartext in the predecessor repo's history. Not a Metta blocker (not banking or Plaid credentials, unused by Metta) but **mandatory**, and not satisfied by having deleted the file. |
 
 ---
 
@@ -654,21 +668,21 @@ in PRODUCTION_LAUNCH_CHECKLIST.md.
 | Email verification working | **PASS** (code) · **BLOCKED** (delivery, LB-5) |
 | Password reset working | **PASS** (code) · **BLOCKED** (delivery, LB-5) |
 | Tenant ownership added everywhere | **PASS** |
-| Old owner's data migrated | **FAIL — LB-1** |
-| Tenant-isolation tests passing | **PASS** (50/50) |
+| Old owner's data migrated | **FAIL — LB-1** (rehearsed end-to-end against a fixture; §22) |
+| Tenant-isolation tests passing | **PASS** (50/50, on SQLite and PostgreSQL) |
 | Plaid tokens encrypted | **PASS** |
 | Plaid webhooks cryptographically verified | **PASS** (code) · **BLOCKED** (real signature, LB-4) |
-| Secrets audited | **PASS** |
+| Secrets audited | **PASS** (working tree and full git history) · **rotation required in the predecessor repo, LB-1b** |
 | Rate limits enabled | **PASS** |
-| Security headers tested | **PASS** (code) · **BLOCKED** (live browser, LB-9) |
+| Security headers tested | **PASS** (real built responses, `npm run audit:headers`) · **BLOCKED** (live browser, LB-9) |
 | CSP tested with Plaid | **FAIL — LB-4/LB-9** |
 | AI isolation verified | **PASS** |
 | Account deletion tested | **PASS** |
 | Data export tested | **PASS** |
-| Dependency scan reviewed | **PASS** (4 build-time highs accepted) |
+| Dependency scan reviewed | **PASS** (1 high, unfixable upstream, not bundled — §10 of SECURITY_REVIEW) |
 | Production migrations established | **PASS** |
 | Backups/recovery confirmed | **FAIL — LB-7** |
-| Logs redact sensitive information | **PASS** |
+| Logs redact sensitive information | **PASS** (canary-planted audit; two leaks found and fixed, §22) |
 | Staging environment tested | **FAIL** (not built; not a blocker) |
 | ASVS checklist completed | **PASS** |
 | Threat model completed | **PASS** |
@@ -758,3 +772,280 @@ bundle free of secrets and server-only modules.
 
 **Not verified:** anything requiring real Plaid, Anthropic, Resend, Postgres or
 Vercel credentials, none of which were available. Those are the launch blockers.
+
+---
+
+## 22. Second Review Pass — Delta Report
+
+This section covers the follow-up review that treated the branch as a
+**candidate build, not a certified one**. Its purpose was to attack the work
+rather than describe it, and it found fifteen defects. Three were invisible to
+a fully green test suite; one would have made the application unusable in
+production and nowhere else.
+
+### 22.1 Commits added
+
+| Commit | What it does |
+|---|---|
+| `321cee9` | Persist money as integer cents; no floating-point currency in the database |
+| `e2995b9` | Store money as `BIGINT`; fix three defects a SQLite-only test suite hid |
+| `6299917` | Rehearse the owner migration against a legacy fixture; fix what it broke |
+| `b0a773d` | Fix a CSP that blocked every script in production; audit logs with canaries |
+| `ccb4128` | Audit dependencies and git history for secrets; rotate-mandatory finding |
+
+### 22.2 Tests, before → after
+
+| | Before | After |
+|---|---|---|
+| Test files | 4 | 11 |
+| Tests | 134 | **280** |
+| Engines exercised | SQLite only | **SQLite and PostgreSQL** |
+| Concurrency tests | 0 | 25 (meaningful only on PostgreSQL — see 22.7) |
+
+New suites: `scope-audit`, `cache-and-collection-isolation`,
+`account-lifecycle`, `integration-config`, `concurrency-and-abuse`,
+`money-format`, `logging-redaction`.
+
+**The single most valuable change in this pass was not a test — it was running
+the existing tests on the database production actually uses.** Three
+production-only defects fell out immediately. `npm run test:postgres` now does
+this in one command, and also deploys the committed migrations to get there,
+so the deploy path is exercised too.
+
+### 22.3 Defects found, and the exact fix
+
+Every one of these was live on the branch that the previous version of this
+document described as ready for review.
+
+| # | Defect | Severity | Fix |
+|---|---|---|---|
+| 1 | **Money columns overflowed on PostgreSQL.** Prisma `Int` is 32-bit on PostgreSQL (64-bit on SQLite), capping any amount at $21,474,836.47. A $25,000,000 balance did not clamp — it failed the INSERT with `integer out of range` and would have aborted the entire Plaid sync. `dollarsToCents` clamped to 2^53 cents, a value the column could never hold, so the clamp guaranteed the failure it existed to prevent. | **Critical** | All `*Cents` columns are `BigInt`. Application still works in `number` (exact to 2^53, about $90 trillion); `asCents()` is the single door. Proven by inserting both previously-failing values into real PostgreSQL. |
+| 2 | **A unique constraint that constrained nothing.** `@@unique([userId, match, minAmountCents, maxAmountCents])` covered two nullable columns, and no NULL equals another NULL on either engine. For the common case (an unbounded rule, both bounds NULL) it permitted unlimited duplicates: five concurrent corrections produced four duplicate rules. | High | Sentinel bounds instead of NULL, so the index is real; `learnFromCorrection` became a single atomic upsert on it. A direct SQL probe confirmed the old index accepted three identical rows and the new one rejects the second. |
+| 3 | **Search was case-sensitive in production only.** `contains` compiles to `LIKE`, case-insensitive on SQLite and case-sensitive on PostgreSQL. "starbucks" would never have matched "Starbucks" — in transaction search, the assistant's merchant lookup, and category peer detection. | High | `containsInsensitive()` applies `mode: "insensitive"` on PostgreSQL only, since the SQLite client does not generate the field. |
+| 4 | **CSP blocked every script on every page.** The policy used `'strict-dynamic'` with a per-request nonce. Under CSP Level 3 `'strict-dynamic'` makes `'self'` and every host-source in `script-src` be **ignored**, so a nonce is the only thing that can allow a script — and every page was statically prerendered, so no script tag carried one. Served bytes: 11 script tags, 0 nonced, plus an unnonced inline RSC script, under `s-maxage=31536000`. The application would have been a blank page in production, and only in production. | **Critical** | The proxy sets the CSP on the **request** headers (how Next finds the nonce), on public paths too; the root layout renders dynamically, because a cached page would serve one visitor's nonce to everyone. Verified on a real build: header and HTML nonces match, all 11 scripts carry it, it differs per request, and the page is no longer shared-cached. |
+| 5 | **No migration path existed from the legacy database.** The only committed migration creates from empty, so Prisma refuses with `P3005`. Generating one automatically is worse: `prisma migrate diff` emits `DROP COLUMN "amount", ADD COLUMN "amountCents"` — destroying every dollar figure in the same statement that adds the column meant to hold it. | **Critical** | Hand-written expand/backfill/contract sequence in `scripts/legacy-upgrade/`, where legacy values stay readable until the totals have been compared. |
+| 6 | **The owner-migration script could not start.** It imports a module marked `server-only`, which throws outside a server build, so it died on its first import before printing anything. It had never been executed. | **Critical** | A narrow require shim used only by operator scripts. |
+| 7 | **It seeded a second category catalog instead of claiming the legacy one**, leaving every legacy `Transaction.categoryId` pointing at a category owned by nobody — which then fails the foreign key the contract phase adds. | High | Categories are claimed; the catalog is seeded only when there are none. |
+| 8 | **It never claimed `Category` or `Setting` rows**, leaving them permanently unowned. | High | Both added to the claim list; the completeness check now covers all eleven models, not just transactions. |
+| 9 | **It silently dropped `Holding.price`**, zeroing every holding's market price, because the column was renamed and was not in the conversion table. | High | Copied as a float (it is a quote needing sub-cent precision, never summed), with the reason recorded at the call site. |
+| 10 | **The multi-tenant stop condition counted unowned rows as belonging to other users**, so the script would refuse to run as soon as any second person signed up — on exactly the database it was written for. | Medium | Counts only rows owned by a different real user. |
+| 11 | **Free text in an error message leaked an account name and an exact balance.** Redaction worked on key names and credential-shaped values; a bank name is just words and a balance is just digits. Most errors are not ours — Prisma embeds column values in constraint violations, SDKs embed identifiers, Node embeds paths. | High | An error's message is withheld by default and released only for error types we author. Class, code, status, stack frames and correlation id all survive. Digit runs of four or more in free text are masked. |
+| 12 | **`log.error("failed", { account })` published the bank name, mask and balance**, because the leaf keys are innocuous — `name` is just `name`. | High | Financial *container* keys are matched exactly, so `account` is reduced to a marker while `accountId` and `itemId` keep flowing. |
+| 13 | **The assistant's goal planner understated every goal by 100×.** It passed user-typed dollars to a formatter expecting cents, so "save $5,000" answered "$50.00". | Medium | Dollars converted once at the parse; the per-file formatter shims replaced by a shared `formatCents`, with a test forbidding server modules from calling the dollars formatter. |
+| 14 | `nanoid` advisory (GHSA-2v37-7h3g-55p8). | Low | `npm audit fix`; 4 high → 3 high. |
+| 15 | **Real credentials in the predecessor repository's git history.** | See 22.10 | Rotation mandatory; LB-1b. |
+
+Two further hardening changes, not defects: id-only Item mutators
+(`setItemStatusById`, `claimSyncSlot`, `releaseSyncSlot`) now require a
+`userId` and scope the write with `updateMany`, so the webhook path is
+self-evidently tenant-scoped rather than safe-by-argument; and eight Prisma
+call sites moved from "safe because of a check three lines up" to "safe
+because the query says so", locked in by `tests/scope-audit.test.ts`.
+
+**A note on the tooling.** The first version of the history secret scanner had
+a false positive of its own: `\s*` in its assignment patterns matched across a
+newline, so an empty `APP_PASSWORD=` matched the following line. It is fixed. A
+scanner that cries wolf gets ignored, which is worse than no scanner.
+
+### 22.4 Money migration result
+
+Money is stored as an exact integer number of cents in a `BIGINT` column.
+Nothing about a currency amount is floating-point at rest.
+
+Two fields are deliberately **not** integer cents, and both are documented at
+their definition:
+
+| Field | Why |
+|---|---|
+| `Holding.quantity` | A count of units, not currency. Fractional shares and crypto make it genuinely non-integer (0.0431 BTC). |
+| `Holding.priceUsd` | A market quote needing sub-cent precision — a token can trade at $0.000012. Display-only and never summed; the summed value is `Holding.valueCents`. |
+
+Correctness evidence, all from the migration rehearsal on real PostgreSQL:
+
+- Transaction total identical to the cent before and after conversion:
+  `-2400440393` cents on both sides.
+- Plaid sign convention preserved exactly: refunds and income stay negative, a
+  credit-card balance stays positive (the amount owed).
+- Partial reimbursement preserved ($200.00 charge, $120.00 repaid).
+- Half-cent values round away from zero **symmetrically**: `+1.005` → `101`
+  cents and `-1.005` → `-101`. (`Math.round(-0.5)` is `-0`, which would have
+  rounded a debit and a credit in opposite directions.)
+- A $25,000,000 balance survives as `2500000000` cents — it could not have been
+  stored at all before this change.
+- Negative (overdrawn) and pending rows unaffected.
+
+### 22.5 Owner-migration rehearsal result
+
+**No production database was touched.** The fixture was built from the real
+legacy schema in `rolonbeto1-spec/bull-trader` and seeded with the awkward
+cases: refunds, partial and full reimbursements, pending charges, a credit-card
+balance, an overdrawn account, a $25,000,000 brokerage balance, and half-cent
+values in both directions.
+
+Row counts, before → after:
+
+| Model | Before | After | Owned by the owner |
+|---|---|---|---|
+| Item | 2 | 2 | 2 |
+| Account | 6 | 6 | 6 |
+| Transaction | 11 | 11 | 11 |
+| Holding | 2 | 2 | 2 |
+| Category | 3 | 3 | 3 |
+| MerchantRule | 3 | 3 | 3 |
+| Budget | 1 | 1 | 1 |
+| Goal | 1 | 1 | 1 |
+| Property | 1 | 1 | 1 |
+| Folder | 1 | 1 | 1 |
+| Setting | 1 | 1 | 1 |
+| **Total** | **32** | **32** | **32** |
+
+- Every model gained an owner; **zero orphans**, including no transaction
+  pointing at a category owned by nobody.
+- Both Plaid tokens encrypted, ciphertext verified not to contain the
+  plaintext, key generation recorded; the plaintext column no longer exists.
+- `prisma migrate diff` against the migrated database reports **an empty
+  migration** — no drift from the committed schema.
+- After baselining, `prisma migrate deploy` reports no pending migrations.
+- Re-running the backfill is a clean no-op.
+
+Refusals, all verified:
+
+| Unsafe action | Result |
+|---|---|
+| Contract phase before the backfill | Aborts, rolls back, legacy money intact |
+| Contract phase with an unencrypted token | Aborts (dropping the plaintext column would destroy the bank connection) |
+| Owner not email-verified | Refuses |
+| No encryption key configured | Refuses |
+| Another user genuinely owns rows | Refuses |
+| A second user exists but owns nothing | Proceeds (correctly) |
+
+The runbook is `scripts/legacy-upgrade/README.md`. **LB-1 stays open**: a
+rehearsal against a fixture is not a migration of the real database, and the
+tested-backup step has not been performed.
+
+### 22.6 Cache-isolation attack result
+
+13 tests across 24 endpoints, each exercising the real handlers as two
+different tenants in sequence and comparing bodies and headers rather than
+reading the source. No response body was served to the wrong tenant, and no
+authenticated response was publicly cacheable.
+
+Confirmed against **real built responses** as well (`npm run audit:headers`):
+authenticated API responses carry `Cache-Control: private, no-store,
+max-age=0, must-revalidate` with `Vary: Cookie`, and nothing on `/api/` is
+`public` or carries `s-maxage`.
+
+**LB-10 stays open**: this is process-local. It does not prove behaviour at
+Vercel's edge with two live signed-in users, which is a different system.
+
+### 22.7 Concurrency attack result
+
+25 tests, run with genuine parallelism against a real database.
+
+**An important caveat about the earlier version of these tests: SQLite
+serialises writers.** A test asserting that exactly one of ten racing writers
+wins proves very little when the engine never let them race. These now run on
+PostgreSQL, where the race is real.
+
+| Attack | Result |
+|---|---|
+| 10 simultaneous claims on one sync lock | Exactly one wins |
+| Cross-tenant claim on a free Item | Refused |
+| Stale lock after a killed function | Reclaimed after 20 minutes |
+| Webhook and manual sync firing together | Row unchanged; no double-sync |
+| 5 concurrent duplicate Plaid item / transaction / budget / folder creations | Exactly one succeeds each |
+| Re-linking one tenant's Plaid item as another | Rejected; original untouched |
+| 5 concurrent merchant-rule corrections | Converge on one row (**this is the test that found defect 2**) |
+| Concurrent per-tenant category edits | No crossing |
+| Replayed webhook delivery | De-duplicated by fingerprint |
+| Account deletion racing a sync | No partial data |
+| Burst of `max + 10` concurrent rate-limited calls | Never more than `max` allowed |
+| 10 accounts against the global AI ceiling | One shared counter; extra accounts do not buy extra spend |
+
+### 22.8 Logging audit result
+
+`tests/logging-redaction.test.ts` plants unmistakable canaries — a Plaid token,
+a bank account name, a transaction description, an exact balance, an email, a
+session cookie, a reset token, an Anthropic-shaped key, a database URL with a
+password — drives the real code paths including failures, captures everything
+written to stdout and stderr, and asserts no canary appears. It checks the
+audit table too, which is a log that happens to be durable.
+
+It found defects 11 and 12 above. After the fix, no canary reaches the log
+stream on any exercised path, and one test asserts the suite produced real
+output so the assertions cannot pass vacuously.
+
+### 22.9 Header and CSP result
+
+33 assertions against real responses from a production build, not against the
+configuration that produces them. This distinction is the whole point: the
+previous proxy test asserted on the **shape of the source** and passed happily
+while the served pages carried a nonce no script could use. It now calls the
+proxy and reads the headers.
+
+Verified live: CSP with `frame-ancestors 'none'`, `object-src 'none'`,
+`base-uri 'self'`, `form-action 'self'`, no `'unsafe-inline'` or `'unsafe-eval'`
+in `script-src`; HSTS; `nosniff`; `X-Frame-Options: DENY`; Referrer-Policy;
+Permissions-Policy; COOP/CORP; no `X-Powered-By`; a nonce that matches the HTML,
+covers all 11 script tags, differs per request, and is not shared-cached.
+
+**LB-9 stays open**: this is a local production build over HTTP. It is not the
+live domain, and it is not a browser actually executing the page with Plaid
+Link loaded.
+
+### 22.10 Secret and dependency audit result
+
+Working tree: clean. Full git history of this repository: **clean** — 9
+commits, 537 blobs, no credential; every match is a documented placeholder or a
+deliberately fake fixture. No `.env` has ever been committed here.
+
+**The predecessor repository is not clean.** `rolonbeto1-spec/bull-trader`
+committed a real `.env` in commit `1fa2ee2` (2026-04-29), removed in `db04748`
+(2026-08-11), exposing `ALPACA_API_KEY`, `ALPACA_SECRET_KEY` and
+`FINNHUB_API_KEY` for roughly three and a half months. They remain readable in
+that repository's history and in every clone of it. **No value is reproduced in
+this or any other document.**
+
+These are market-data and paper-trading credentials — not banking, Plaid or
+Metta credentials — and the feature that used them was deleted, so they are not
+a route into any user's financial data and not a Metta launch blocker.
+**Rotation is mandatory regardless** (LB-1b), and is not satisfied by having
+deleted the file or by rewriting history. Assume anything ever pushed has been
+read.
+
+Dependencies: 3 high, 0 critical. The remaining advisory (`deepmerge-ts` via
+`@prisma/config`) has **no fixed release** — Prisma 7.10.0 still pins the
+vulnerable version, and `npm audit fix --force` proposes *downgrading* Prisma
+to an older, incompatible release, which was rejected. It is in the production
+dependency tree but is not bundled into the served application (verified
+against the built output). Not a blocker; the reasoning is written down so it
+can be challenged.
+
+### 22.11 What still needs a second pair of eyes
+
+Ranked by how much a reviewer's disagreement would change the design.
+
+1. **The `BigInt` money migration.** It touches every financial read path.
+   The compiler enumerated all 67 call sites and each was converted with
+   `asCents()` at the read, but a reviewer should check the *arithmetic*, not
+   just that it compiles — especially aggregation, sorting and percentage
+   maths in `queries.ts`, `hive.ts`, `budget.ts` and `assistant-llm.ts`.
+2. **The decision to render every page dynamically.** This is the cost of a
+   real CSP nonce, and it removes static prerendering entirely. A reviewer may
+   reasonably prefer a nonce-free policy with a narrower `script-src`. The
+   trade-off is stated in `src/app/layout.tsx`; it deserves a second opinion.
+3. **Withholding error messages from logs by default.** This meaningfully
+   reduces what an operator sees during an incident. The allow-list of
+   error types we author is the lever; a reviewer should decide whether it is
+   drawn in the right place.
+4. **The expand/backfill/contract migration**, line by line against a restored
+   copy of the real production database — not against the fixture. Phase 3 is
+   irreversible.
+5. **`containsInsensitive()`**, which branches on the datasource URL. It is a
+   deliberate, contained runtime branch, but it is a branch, and a reviewer
+   should confirm it cannot silently fall back to case-sensitive matching.
+6. **The sentinel bounds on `MerchantRule`.** They fix a real bug, but they
+   mean `-9007199254740000` now appears in the data as "no lower bound". A
+   reviewer should confirm no query treats it as a real amount.
+7. **Everything in §18**, none of which any amount of testing can close.
+
