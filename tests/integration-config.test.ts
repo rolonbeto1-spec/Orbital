@@ -187,9 +187,46 @@ describe("Proxy behaviour behind a production proxy (§19, §55)", () => {
     expect(proxySource).toMatch(/"\/api\/health"/);
   });
 
-  it("still applies security headers to public paths", () => {
-    // A redirect or a public page must carry CSP too.
-    expect(proxySource).toMatch(/if \(isPublicPath\(pathname\)\) \{\s*return applyHeaders/);
+  it("still applies security headers to public paths", async () => {
+    // Behavioural, not textual: the earlier version of this test matched the
+    // shape of the source, and passed happily while the served pages carried
+    // a nonce no script could use. Call the proxy and read what it returns.
+    const { proxy } = await import("@/proxy");
+    const { NextRequest } = await import("next/server");
+
+    for (const path of ["/login", "/legal/privacy", "/"]) {
+      const response = await proxy(
+        new NextRequest(new Request(`https://metta.test${path}`)),
+      );
+      const csp = response.headers.get("content-security-policy") ?? "";
+      expect(csp, `${path} has no CSP`).toContain("default-src 'self'");
+      expect(csp, `${path} is framable`).toContain("frame-ancestors 'none'");
+      expect(response.headers.get("x-frame-options"), path).toBe("DENY");
+      expect(response.headers.get("x-content-type-options"), path).toBe("nosniff");
+      expect(response.headers.get("referrer-policy"), path).toMatch(/strict-origin/);
+    }
+  });
+
+  it("hands the nonce to the renderer on every path, not just private ones", async () => {
+    // `'strict-dynamic'` makes 'self' and every host-source be ignored for
+    // scripts, so a script with no nonce is a blocked script. Next stamps the
+    // nonce onto its script tags by reading it from the CSP request header —
+    // which means the proxy has to set that header on the REQUEST. When it
+    // only set it on the response, every script on every page was blocked in
+    // production. scripts/check-headers.sh proves the end result against a
+    // real build; this keeps the wiring from regressing.
+    expect(proxySource).toMatch(/requestHeaders\.set\(\s*"Content-Security-Policy"/);
+    expect(proxySource).toMatch(/NextResponse\.next\(\{ request: withNonce\(\) \}\)/);
+    // And the public branch must use it too — /login is a page that needs JS.
+    const publicBranch = proxySource.slice(proxySource.indexOf("isPublicPath(pathname)"));
+    expect(publicBranch).toMatch(/withNonce\(\)/);
+  });
+
+  it("renders every page dynamically, because a cached nonce is not a nonce", async () => {
+    // A prerendered page is baked once; it cannot carry a per-request nonce,
+    // and serving a cached one would hand every visitor the same value.
+    const layout = fs.readFileSync("src/app/layout.tsx", "utf8");
+    expect(layout).toMatch(/export const dynamic = "force-dynamic"/);
   });
 
   it("documents itself as optimistic, not authoritative", () => {

@@ -133,16 +133,44 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
 
   // A fresh nonce per request. Reusing one would defeat the point.
   const nonce = Buffer.from(crypto.randomUUID()).toString("base64");
+  const headers = securityHeaders(nonce, isDev);
 
   const applyHeaders = (response: NextResponse): NextResponse => {
-    for (const [key, value] of Object.entries(securityHeaders(nonce, isDev))) {
+    for (const [key, value] of Object.entries(headers)) {
       response.headers.set(key, value);
     }
     return response;
   };
 
+  /**
+   * Hand the nonce to the renderer, on EVERY path.
+   *
+   * This is what makes the nonce real rather than decorative. Next reads the
+   * nonce out of the `Content-Security-Policy` REQUEST header and stamps it
+   * onto the script tags it emits — including the inline RSC payload script.
+   * Without it, the response advertises `'strict-dynamic'` while not one
+   * script carries a nonce, and CSP Level 3 says `'strict-dynamic'` causes
+   * `'self'` and every host-source to be IGNORED for scripts. The result is
+   * not a weaker policy, it is a blank page: every script on every page is
+   * blocked, in production only, where the CSP is strictest.
+   *
+   * Consequence, accepted deliberately: a page that carries a per-request
+   * nonce cannot also be statically prerendered, because the nonce differs on
+   * every request. A cached page would serve one visitor's nonce to everyone,
+   * which is the same as having none. Correctness wins over the prerender.
+   */
+  const withNonce = (): { headers: Headers } => {
+    const requestHeaders = new Headers(request.headers);
+    requestHeaders.set("x-nonce", nonce);
+    requestHeaders.set("Content-Security-Policy", headers["Content-Security-Policy"]);
+    return { headers: requestHeaders };
+  };
+
   if (isPublicPath(pathname)) {
-    return applyHeaders(NextResponse.next());
+    // Public pages need this just as much: /login is the page whose scripts
+    // were blocked, and a sign-in form that cannot run JavaScript is a
+    // sign-in form nobody can use.
+    return applyHeaders(NextResponse.next({ request: withNonce() }));
   }
 
   // Optimistic check only — see the note at the top of this file.
@@ -166,18 +194,7 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
     return applyHeaders(NextResponse.redirect(loginUrl));
   }
 
-  const response = NextResponse.next({
-    request: {
-      // Expose the nonce to the app so server components can attach it to any
-      // inline script they render.
-      headers: (() => {
-        const headers = new Headers(request.headers);
-        headers.set("x-nonce", nonce);
-        return headers;
-      })(),
-    },
-  });
-  return applyHeaders(response);
+  return applyHeaders(NextResponse.next({ request: withNonce() }));
 }
 
 export const config = {

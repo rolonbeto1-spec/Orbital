@@ -78,6 +78,23 @@ const FINANCIAL_KEYS = [
 /** Personal identifiers: kept only as a coarse, non-reversible marker. */
 const PII_KEYS = ["email", "phone", "phonenumber", "ssn", "taxid", "address", "ip", "ipaddress"];
 
+/**
+ * Keys whose VALUE is a financial record rather than a scalar — an account,
+ * an item, a transaction. Matched by exact name, never by substring, so that
+ * `itemId` and `accountId` (useful, non-personal identifiers) keep flowing
+ * through while `item` and `account` do not.
+ *
+ * Without this, `log.error("failed", { account })` publishes the bank's name,
+ * the mask and the balance. The nested field names are innocuous — `name` is
+ * just `name` — so no deny-list of leaf keys can catch it. The container is
+ * what identifies the contents.
+ */
+const FINANCIAL_CONTAINER_KEYS = new Set([
+  "account", "accounts", "item", "items", "transaction", "holding",
+  "merchant", "budget", "budgets", "goal", "goals", "property", "properties",
+  "category", "categories", "rule", "rules", "user", "owner",
+]);
+
 const MAX_STRING = 200;
 const MAX_ARRAY = 20;
 const MAX_DEPTH = 4;
@@ -113,12 +130,23 @@ function keyIn(key: string, list: string[]): boolean {
   return list.some((entry) => k === normalizeKey(entry) || k.includes(normalizeKey(entry)));
 }
 
+/**
+ * Long digit runs in free text: an amount in cents, an account number, a
+ * card's last digits stitched into a sentence. Four or more digits is the
+ * threshold because a balance is always at least that once it is in cents,
+ * while a year, an HTTP status and a small count are not.
+ *
+ * Applied after the credential patterns, so it cannot break a token match.
+ */
+const LONG_NUMBER = /\d{4,}/g;
+
 /** Scrub credential-shaped substrings out of free text. */
 export function scrubString(input: string): string {
   let out = input;
   for (const [pattern, replacement] of CREDENTIAL_PATTERNS) {
     out = out.replace(pattern, replacement);
   }
+  out = out.replace(LONG_NUMBER, "[redacted:number]");
   if (out.length > MAX_STRING) out = `${out.slice(0, MAX_STRING)}…[truncated]`;
   return out;
 }
@@ -148,13 +176,7 @@ export function redact(value: unknown, depth = 0): unknown {
   if (value instanceof Date) return value.toISOString();
 
   if (value instanceof Error) {
-    return {
-      name: value.name,
-      message: scrubString(value.message),
-      // Stack traces are kept server-side only and still scrubbed: they
-      // routinely contain query strings and config values.
-      stack: value.stack ? scrubString(value.stack.split("\n").slice(0, 5).join("\n")) : undefined,
-    };
+    return redactError(value);
   }
 
   if (Array.isArray(value)) {
@@ -168,6 +190,8 @@ export function redact(value: unknown, depth = 0): unknown {
     for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
       if (keyIn(key, SECRET_KEYS)) {
         out[key] = "[redacted]";
+      } else if (FINANCIAL_CONTAINER_KEYS.has(normalizeKey(key))) {
+        out[key] = financialMarker(raw);
       } else if (keyIn(key, FINANCIAL_KEYS)) {
         out[key] = financialMarker(raw);
       } else if (keyIn(key, PII_KEYS)) {
@@ -180,6 +204,72 @@ export function redact(value: unknown, depth = 0): unknown {
   }
 
   return "[unknown]";
+}
+
+/**
+ * Mark an error's message as safe to log verbatim.
+ *
+ * Default-deny is the rule here, and the reason is that most errors are not
+ * ours. Prisma embeds column values in constraint violations, SDKs embed
+ * request URLs and identifiers, Node embeds filesystem paths. A message like
+ * `failed writing Acme Savings balance 4210055` contains a bank account name
+ * and an exact balance, and neither has a shape any pattern can recognise —
+ * an account name is just words. So a message is withheld unless the code
+ * that threw it says it carries no user data.
+ *
+ * What survives redaction is still enough to debug with: the error class, its
+ * code or status, the stack frames, and the correlation id that ties the log
+ * line to the user's error reference.
+ */
+export function safeToLog<E extends Error>(error: E): E {
+  Object.defineProperty(error, SAFE_MESSAGE, { value: true, enumerable: false });
+  return error;
+}
+
+const SAFE_MESSAGE = Symbol.for("metta.safeLogMessage");
+
+/** Errors whose messages we author and which never interpolate user data. */
+const SAFE_ERROR_NAMES = new Set([
+  "UnauthenticatedError",
+  "ForbiddenError",
+  "NotFoundError",
+  "HttpError",
+  "AiBudgetExceeded",
+  "ZodError",
+]);
+
+function redactError(error: Error): Record<string, unknown> {
+  const carrier = error as Error & {
+    code?: unknown;
+    status?: unknown;
+    [SAFE_MESSAGE]?: boolean;
+  };
+
+  const messageIsSafe =
+    carrier[SAFE_MESSAGE] === true || SAFE_ERROR_NAMES.has(error.name);
+
+  return {
+    name: error.name,
+    // A code or status is a low-cardinality constant, not user data, and is
+    // usually the single most useful field when reading logs.
+    ...(typeof carrier.code === "string" || typeof carrier.code === "number"
+      ? { code: carrier.code }
+      : {}),
+    ...(typeof carrier.status === "number" ? { status: carrier.status } : {}),
+    message: messageIsSafe
+      ? scrubString(error.message)
+      : `[message withheld: ${error.message.length} chars]`,
+    // Stack traces are kept server-side only, scrubbed, and stripped of their
+    // first line — that line is a copy of the message.
+    stack: error.stack
+      ? scrubString(
+          error.stack
+            .split("\n")
+            .slice(1, 6)
+            .join("\n"),
+        )
+      : undefined,
+  };
 }
 
 /**

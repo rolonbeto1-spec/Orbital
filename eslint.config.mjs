@@ -39,7 +39,7 @@ const eslintConfig = defineConfig([
     // Scripts and the dev seed are operator tools, not shipped code. They are
     // CommonJS by design: they run under plain node during a build, before any
     // bundler is involved.
-    files: ["scripts/**/*.{js,ts}", "prisma/seed.ts", "tests/**/*.ts"],
+    files: ["scripts/**/*.{js,cjs,mjs,ts}", "prisma/seed.ts", "tests/**/*.ts"],
     rules: {
       "no-console": "off",
       "@typescript-eslint/no-require-imports": "off",
