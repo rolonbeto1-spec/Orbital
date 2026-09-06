@@ -24,7 +24,7 @@
     "check": "npm run typecheck && npm run lint && npm run test",
     "check:full": "npm run check && npm run test:postgres",
     "db:migrate": "prisma migrate dev",
-    "migrate:owner": "tsx scripts/migrate-owner-data.ts"
+    "migrate:owner": "tsx --require ./scripts/lib/allow-server-only.cjs scripts/migrate-owner-data.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

@@ -149,8 +149,12 @@ async function main(): Promise<void> {
   // database that has never had more than one person's data in it.
   const otherUsers = await prisma.user.count({ where: { id: { not: owner.id } } });
   if (otherUsers > 0) {
+    // Rows owned by a DIFFERENT REAL user. Deliberately excludes the "" rows:
+    // those are the unowned legacy rows this script exists to claim, and
+    // counting them would make the script refuse to run on exactly the
+    // database it was written for as soon as a second person has signed up.
     const otherOwned = await prisma.transaction.count({
-      where: { userId: { not: owner.id } },
+      where: { userId: { notIn: [owner.id, ""] } },
     });
     if (otherOwned > 0) {
       console.error(
@@ -197,22 +201,6 @@ async function main(): Promise<void> {
   // --- Migrate -----------------------------------------------------------
   console.log("\nMigrating…");
 
-  // The owner needs their own category catalog before their transactions can
-  // point at categories.
-  const ownerCategories = await prisma.category.count({ where: { userId: owner.id } });
-  if (ownerCategories === 0) {
-    await prisma.category.createMany({
-      data: CATEGORIES.map((category) => ({
-        userId: owner.id,
-        name: category.name,
-        icon: category.icon,
-        color: category.color,
-        group: category.group,
-      })),
-    });
-    console.log(`  seeded ${CATEGORIES.length} categories`);
-  }
-
   // Encrypt tokens BEFORE anything else. If this fails we want to have
   // changed nothing.
   for (const item of plaintextTokens) {
@@ -250,6 +238,32 @@ async function main(): Promise<void> {
     ["Property", "sweatIn", "sweatInCents"],
     ["Property", "sweatOut", "sweatOutCents"],
   ];
+
+  // Not every renamed column is money. Holding.price became Holding.priceUsd
+  // and stays a float on purpose: it is a market quote that can need sub-cent
+  // precision (a token at $0.000012), it is display-only, and it is never
+  // summed — Holding.valueCents is the figure aggregations use. Without this
+  // copy the column keeps its default of 0 and every holding silently loses
+  // its price.
+  const RENAMED_COLUMNS: Array<[table: string, legacy: string, next: string]> = [
+    ["Holding", "price", "priceUsd"],
+  ];
+
+  let copied = 0;
+  for (const [table, legacy, next] of RENAMED_COLUMNS) {
+    try {
+      await prisma.$executeRawUnsafe(
+        `UPDATE "${table}" SET "${next}" = "${legacy}" WHERE "${legacy}" IS NOT NULL`,
+      );
+      const [{ n }] = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
+        `SELECT COUNT(*) AS n FROM "${table}" WHERE "${legacy}" IS NOT NULL`,
+      );
+      copied += Number(n);
+    } catch {
+      // Legacy column absent: already migrated.
+    }
+  }
+  if (copied > 0) console.log(`  copied ${copied} renamed non-money values`);
 
   let converted = 0;
   for (const [table, legacy, next] of MONEY_COLUMNS) {
@@ -289,11 +303,35 @@ async function main(): Promise<void> {
     ["goals", () => prisma.goal.updateMany({ where: { userId: "" }, data: { userId: owner.id } })],
     ["properties", () => prisma.property.updateMany({ where: { userId: "" }, data: { userId: owner.id } })],
     ["folders", () => prisma.folder.updateMany({ where: { userId: "" }, data: { userId: owner.id } })],
+    // Categories are CLAIMED, never re-seeded around. The legacy rows are the
+    // ones every legacy Transaction.categoryId already points at; creating a
+    // parallel catalog for the owner would leave those references pointing at
+    // categories belonging to nobody, which then fails the foreign key that
+    // phase 3 adds. Claiming preserves every existing categorisation.
+    ["categories", () => prisma.category.updateMany({ where: { userId: "" }, data: { userId: owner.id } })],
+    ["settings", () => prisma.setting.updateMany({ where: { userId: "" }, data: { userId: owner.id } })],
   ];
 
   for (const [name, run] of assignments) {
     const { count } = await run();
     if (count > 0) console.log(`  claimed ${count} ${name}`);
+  }
+
+  // Only now, and only if the database genuinely had no categories, seed the
+  // default catalog. A legacy database always has one, so this is the path for
+  // an empty database rather than the normal migration path.
+  const ownerCategories = await prisma.category.count({ where: { userId: owner.id } });
+  if (ownerCategories === 0) {
+    await prisma.category.createMany({
+      data: CATEGORIES.map((category) => ({
+        userId: owner.id,
+        name: category.name,
+        icon: category.icon,
+        color: category.color,
+        group: category.group,
+      })),
+    });
+    console.log(`  seeded ${CATEGORIES.length} categories`);
   }
 
   // --- Verify ------------------------------------------------------------
@@ -314,9 +352,29 @@ async function main(): Promise<void> {
   }
 
   // And nothing may be left unowned (§66 step 4).
-  const unowned = await prisma.transaction.count({ where: { userId: "" } });
+  // Every owned model, not just transactions: an orphan anywhere blocks the
+  // foreign keys that phase 3 adds, and an orphan is invisible to the app.
+  const orphanCounts = await Promise.all([
+    prisma.item.count({ where: { userId: "" } }),
+    prisma.account.count({ where: { userId: "" } }),
+    prisma.transaction.count({ where: { userId: "" } }),
+    prisma.holding.count({ where: { userId: "" } }),
+    prisma.category.count({ where: { userId: "" } }),
+    prisma.merchantRule.count({ where: { userId: "" } }),
+    prisma.budget.count({ where: { userId: "" } }),
+    prisma.goal.count({ where: { userId: "" } }),
+    prisma.property.count({ where: { userId: "" } }),
+    prisma.folder.count({ where: { userId: "" } }),
+    prisma.setting.count({ where: { userId: "" } }),
+  ]);
+  const unowned = orphanCounts.reduce((total, count) => total + count, 0);
   if (unowned > 0) {
-    console.error(`\nWARNING: ${unowned} transactions still have no owner.`);
+    console.error(`\nWARNING: ${unowned} rows still have no owner: ` +
+      ["items","accounts","transactions","holdings","categories","merchantRules",
+       "budgets","goals","properties","folders","settings"]
+        .map((name, index) => `${name}=${orphanCounts[index]}`)
+        .filter((pair) => !pair.endsWith("=0"))
+        .join(", "));
     process.exit(1);
   }
 
