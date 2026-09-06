@@ -12,6 +12,7 @@ import {
   aiConfigured,
   AiBudgetExceeded,
 } from "@/lib/ai/guard";
+import { centsToDollars } from "@/lib/money";
 import { sanitizeDisplayUrl } from "@/lib/security/url-guard";
 import { log } from "@/lib/security/logger";
 
@@ -71,12 +72,12 @@ export async function aiSortNewTransactions(userId: string): Promise<number> {
     const candidates = await prisma.transaction.findMany({
       where: {
         userId,
-        amount: { gt: 0 },
+        amountCents: { gt: 0 },
         OR: [{ categoryId: null }, ...(otherId ? [{ categoryId: otherId }] : [])],
       },
       orderBy: { date: "desc" },
       take: BATCH,
-      select: { id: true, name: true, merchantName: true, amount: true },
+      select: { id: true, name: true, merchantName: true, amountCents: true },
     });
     if (candidates.length === 0) return 0;
 
@@ -86,7 +87,10 @@ export async function aiSortNewTransactions(userId: string): Promise<number> {
     // transaction — no account, no balance, no notes, no internal ids beyond
     // the row id the model must echo back (§30).
     const lines = candidates
-      .map((t) => `${t.id}\t${untrusted(t.merchantName || t.name, 80)}\t$${t.amount.toFixed(2)}`)
+      .map(
+        (t) =>
+          `${t.id}\t${untrusted(t.merchantName || t.name, 80)}\t$${centsToDollars(t.amountCents).toFixed(2)}`,
+      )
       .join("\n");
 
     const text = await askClaude({
@@ -158,7 +162,7 @@ export async function aiAuditTransactions(userId: string): Promise<number> {
       select: { match: true },
     });
     const transactions = await prisma.transaction.findMany({
-      where: { userId, amount: { gt: 0 }, date: { gte: since } },
+      where: { userId, amountCents: { gt: 0 }, date: { gte: since } },
       include: { category: { select: { name: true } } },
       orderBy: { date: "desc" },
       take: AUDIT_MAX_TXNS,
@@ -182,9 +186,9 @@ export async function aiAuditTransactions(userId: string): Promise<number> {
       const lines = chunk
         .map(
           (t) =>
-            `${t.id}\t${untrusted(t.merchantName || t.name, 80)}\t$${t.amount.toFixed(2)}\t${
-              t.category?.name ?? "Uncategorized"
-            }`,
+            `${t.id}\t${untrusted(t.merchantName || t.name, 80)}\t$${centsToDollars(
+              t.amountCents,
+            ).toFixed(2)}\t${t.category?.name ?? "Uncategorized"}`,
         )
         .join("\n");
 

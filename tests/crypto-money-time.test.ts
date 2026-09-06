@@ -106,98 +106,192 @@ describe("Plaid token encryption (§9)", () => {
 });
 
 // ---------------------------------------------------------------------------
-describe("Money arithmetic (§49)", () => {
-  it("adds without accumulating float error", async () => {
-    const { sumMoney } = await import("@/lib/money");
-    // The canonical failure: 0.1 + 0.2 === 0.30000000000000004.
-    expect(sumMoney([0.1, 0.2])).toBe(0.3);
-    expect(0.1 + 0.2).not.toBe(0.3); // proves the naive version is wrong
+describe("Money — exact integer cents (§49)", () => {
+  it("converts dollars to exact cents", async () => {
+    const { dollarsToCents } = await import("@/lib/money");
+    expect(dollarsToCents(84.21)).toBe(8421);
+    expect(dollarsToCents(0.1)).toBe(10);
+    expect(dollarsToCents(0)).toBe(0);
+    expect(dollarsToCents(-45.67)).toBe(-4567);
+  });
+
+  it("rounds halves away from zero symmetrically for credits and debits", async () => {
+    const { dollarsToCents } = await import("@/lib/money");
+    // Math.round(-0.5) is -0 in JS, which would round debits and credits
+    // differently. Ours does not.
+    expect(dollarsToCents(0.005)).toBe(1);
+    expect(dollarsToCents(-0.005)).toBe(-1);
+    // 1.005 is stored as 1.00499999999999989 — the naive form loses a cent.
+    expect(dollarsToCents(1.005)).toBe(101);
+    expect(dollarsToCents(-1.005)).toBe(-101);
+  });
+
+  it("adds without any accumulated error", async () => {
+    const { sumCents, dollarsToCents } = await import("@/lib/money");
+    expect(sumCents([dollarsToCents(0.1), dollarsToCents(0.2)])).toBe(30);
+    // The naive float version is demonstrably wrong.
+    expect(0.1 + 0.2).not.toBe(0.3);
   });
 
   it("stays exact over ten thousand additions", async () => {
-    const { sumMoney } = await import("@/lib/money");
-    const amounts = Array.from({ length: 10_000 }, () => 0.07);
-    expect(sumMoney(amounts)).toBe(700);
+    const { sumCents } = await import("@/lib/money");
+    const amounts = Array.from({ length: 10_000 }, () => 7); // 7 cents each
+    expect(sumCents(amounts)).toBe(70_000);
 
-    // The naive sum drifts measurably.
-    const naive = amounts.reduce((s, a) => s + a, 0);
+    // The float equivalent drifts.
+    const naive = Array.from({ length: 10_000 }, () => 0.07).reduce((s, a) => s + a, 0);
     expect(naive).not.toBe(700);
   });
 
   it("is order-independent", async () => {
-    const { sumMoney } = await import("@/lib/money");
-    const amounts = [19.99, 0.01, 1234.56, -45.67, 0.1, 0.2, 8.88];
-    const forward = sumMoney(amounts);
-    const backward = sumMoney([...amounts].reverse());
-    expect(forward).toBe(backward);
+    const { sumCents } = await import("@/lib/money");
+    const amounts = [1999, 1, 123456, -4567, 10, 20, 888];
+    expect(sumCents(amounts)).toBe(sumCents([...amounts].reverse()));
   });
 
   it("handles credits, debits, refunds and zero", async () => {
-    const { sumMoney, addMoney, subtractMoney } = await import("@/lib/money");
+    const { sumCents } = await import("@/lib/money");
     // Plaid convention: positive = out, negative = in.
-    expect(sumMoney([100, -100])).toBe(0);
-    expect(sumMoney([50.5, -20.25])).toBe(30.25);
-    expect(addMoney(0, 0)).toBe(0);
-    expect(subtractMoney(0.3, 0.1)).toBe(0.2);
+    expect(sumCents([10_000, -10_000])).toBe(0);
+    expect(sumCents([5050, -2025])).toBe(3025);
+    expect(sumCents([])).toBe(0);
   });
 
-  it("rounds halves away from zero symmetrically for credits and debits", async () => {
-    const { toCents } = await import("@/lib/money");
-    // Math.round(-0.5) is -0 in JS, which would round debits and credits
-    // differently. Ours does not.
-    expect(toCents(0.005)).toBe(1);
-    expect(toCents(-0.005)).toBe(-1);
-    expect(toCents(1.005)).toBe(101);
-    expect(toCents(-1.005)).toBe(-101);
+  it("handles large balances without losing a cent", async () => {
+    const { sumCents, dollarsToCents, centsToDollars } = await import("@/lib/money");
+    expect(sumCents([dollarsToCents(9_999_999.99), 1])).toBe(1_000_000_000);
+    expect(centsToDollars(1_000_000_000)).toBe(10_000_000);
   });
 
-  it("handles large balances without losing cents", async () => {
-    const { sumMoney, roundMoney } = await import("@/lib/money");
-    expect(sumMoney([9_999_999.99, 0.01])).toBe(10_000_000);
-    expect(roundMoney(123456789.126)).toBe(123456789.13);
+  it("refuses to silently overflow past safe-integer territory", async () => {
+    const { dollarsToCents, MAX_SAFE_CENTS } = await import("@/lib/money");
+    expect(dollarsToCents(1e20)).toBe(MAX_SAFE_CENTS);
+    expect(dollarsToCents(-1e20)).toBe(-MAX_SAFE_CENTS);
+    expect(Number.isSafeInteger(MAX_SAFE_CENTS)).toBe(true);
   });
 
   it("treats non-finite input as zero rather than producing NaN", async () => {
-    const { toCents, sumMoney } = await import("@/lib/money");
-    expect(toCents(Number.NaN)).toBe(0);
-    expect(toCents(Number.POSITIVE_INFINITY)).toBe(0);
-    expect(sumMoney([1, Number.NaN, 2])).toBe(3);
+    const { dollarsToCents, sumCents } = await import("@/lib/money");
+    expect(dollarsToCents(Number.NaN)).toBe(0);
+    expect(dollarsToCents(Number.POSITIVE_INFINITY)).toBe(0);
+    expect(sumCents([100, Number.NaN, 200])).toBe(300);
   });
 
-  describe("effectiveSpend — reimbursements", () => {
+  it("rejects non-integer cents defensively", async () => {
+    const { asCents, isValidCents } = await import("@/lib/money");
+    expect(isValidCents(8421)).toBe(true);
+    expect(isValidCents(84.21)).toBe(false);
+    expect(isValidCents("8421")).toBe(false);
+    // A stray float is rounded rather than propagated.
+    expect(asCents(84.6)).toBe(85);
+    expect(asCents("nonsense")).toBe(0);
+  });
+
+  it("round-trips dollars through cents and back", async () => {
+    const { dollarsToCents, centsToDollars } = await import("@/lib/money");
+    for (const dollars of [0, 0.01, 0.1, 1.5, 84.21, 1234.56, -45.67, 999_999.99]) {
+      expect(centsToDollars(dollarsToCents(dollars))).toBeCloseTo(dollars, 10);
+    }
+  });
+
+  describe("effectiveSpendCents — reimbursements", () => {
     it("subtracts a partial reimbursement", async () => {
-      const { effectiveSpend } = await import("@/lib/money");
-      expect(effectiveSpend(100, 40)).toBe(60);
+      const { effectiveSpendCents } = await import("@/lib/money");
+      expect(effectiveSpendCents(10_000, 4000)).toBe(6000);
     });
 
     it("never goes below zero on a full or over reimbursement", async () => {
-      const { effectiveSpend } = await import("@/lib/money");
-      expect(effectiveSpend(100, 100)).toBe(0);
-      expect(effectiveSpend(100, 150)).toBe(0);
+      const { effectiveSpendCents } = await import("@/lib/money");
+      expect(effectiveSpendCents(10_000, 10_000)).toBe(0);
+      expect(effectiveSpendCents(10_000, 15_000)).toBe(0);
     });
 
     it("leaves income and refunds untouched", async () => {
-      const { effectiveSpend } = await import("@/lib/money");
+      const { effectiveSpendCents } = await import("@/lib/money");
       // A refund (negative = money in) must not be turned positive.
-      expect(effectiveSpend(-50, 0)).toBe(-50);
-      expect(effectiveSpend(-50, 20)).toBe(-50);
+      expect(effectiveSpendCents(-5000, 0)).toBe(-5000);
+      expect(effectiveSpendCents(-5000, 2000)).toBe(-5000);
     });
 
     it("ignores a negative reimbursement", async () => {
-      const { effectiveSpend } = await import("@/lib/money");
-      expect(effectiveSpend(100, -25)).toBe(100);
+      const { effectiveSpendCents } = await import("@/lib/money");
+      expect(effectiveSpendCents(10_000, -2500)).toBe(10_000);
     });
 
     it("is exact at the cent", async () => {
-      const { effectiveSpend } = await import("@/lib/money");
-      expect(effectiveSpend(84.21, 28.07)).toBe(56.14);
+      const { effectiveSpendCents } = await import("@/lib/money");
+      expect(effectiveSpendCents(8421, 2807)).toBe(5614);
     });
   });
 
+  it("computes an exact median for odd and even lists", async () => {
+    const { medianCents } = await import("@/lib/money");
+    expect(medianCents([100, 300, 200])).toBe(200);
+    expect(medianCents([100, 200, 300, 400])).toBe(250);
+    // Rounds half away from zero, so the result is still an exact cent.
+    expect(medianCents([100, 101])).toBe(101);
+    expect(medianCents([])).toBe(0);
+  });
+
   it("guards percentages against a zero budget", async () => {
-    const { percentOf } = await import("@/lib/money");
-    expect(percentOf(50, 0)).toBeNull();
-    expect(percentOf(50, 200)).toBe(25);
+    const { percentOfCents } = await import("@/lib/money");
+    expect(percentOfCents(5000, 0)).toBeNull();
+    expect(percentOfCents(5000, 20_000)).toBe(25);
+  });
+
+  it("scales by a rate, rounding once", async () => {
+    const { scaleCents } = await import("@/lib/money");
+    // A weekly $15.49 charge normalised to a month (x4.33).
+    expect(scaleCents(1549, 4.33)).toBe(6707);
+    expect(scaleCents(1000, Number.NaN)).toBe(0);
+  });
+
+  describe("the serialization boundary", () => {
+    it("renames *Cents fields to dollars", async () => {
+      const { serializeMoneyFields } = await import("@/lib/money");
+      const out = serializeMoneyFields({ amountCents: 8421, name: "Whole Foods" });
+      expect(out).toEqual({ amount: 84.21, name: "Whole Foods" });
+    });
+
+    it("handles nulls, nesting and arrays", async () => {
+      const { serializeMoneyFields } = await import("@/lib/money");
+      const out = serializeMoneyFields({
+        availableBalanceCents: null,
+        account: { currentBalanceCents: 250_000 },
+        items: [{ totalCents: 100 }, { totalCents: 250 }],
+      });
+      expect(out).toEqual({
+        availableBalance: null,
+        account: { currentBalance: 2500 },
+        items: [{ total: 1 }, { total: 2.5 }],
+      });
+    });
+
+    it("leaves non-money fields alone, including Dates", async () => {
+      const { serializeMoneyFields } = await import("@/lib/money");
+      const date = new Date("2026-02-01T00:00:00Z");
+      const out = serializeMoneyFields({ date, pending: true, count: 3, quantity: 10.5 });
+      expect(out).toEqual({ date, pending: true, count: 3, quantity: 10.5 });
+    });
+  });
+
+  it("keeps no floating-point money column in the schema", async () => {
+    // A structural assertion: if someone reintroduces `Float` for an amount,
+    // this fails. Holding.quantity and Holding.priceUsd are the two
+    // documented exceptions (a unit count and a market quote).
+    const fs = await import("node:fs");
+    const schema = await fs.promises.readFile("prisma/schema.prisma", "utf8");
+
+    const floatLines = schema
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => /^\w+\s+Float\??\s*(@|$)/.test(line));
+
+    const allowed = ["quantity", "priceUsd"];
+    for (const line of floatLines) {
+      const field = line.split(/\s+/)[0];
+      expect(allowed, `unexpected Float column: ${line}`).toContain(field);
+    }
   });
 });
 

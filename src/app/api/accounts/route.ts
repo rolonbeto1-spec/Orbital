@@ -1,5 +1,6 @@
 import { route, safeJson } from "@/lib/security/api";
 import { listItemsForUser } from "@/lib/plaid-items";
+import { serializeMoneyFields } from "@/lib/money";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,5 +14,6 @@ export const dynamic = "force-dynamic";
  */
 export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
   const items = await listItemsForUser(ctx.user.id);
-  return safeJson({ items });
+  // Cents -> dollars once, at the boundary (§49).
+  return safeJson({ items: items.map((item) => serializeMoneyFields(item)) });
 });

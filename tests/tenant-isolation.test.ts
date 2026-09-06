@@ -279,7 +279,7 @@ describe("A cannot WRITE to B's records (IDOR)", () => {
     );
     expect(response.status).toBe(404);
     const after = await prisma.budget.findUniqueOrThrow({ where: { id: bob.budgetId } });
-    expect(after.amount).toBe(600);
+    expect(after.amountCents).toBe(60_000);
   });
 
   it("POST /api/budgets cannot create a budget on B's category", async () => {
@@ -292,7 +292,7 @@ describe("A cannot WRITE to B's records (IDOR)", () => {
     const budgets = await prisma.budget.findMany({ where: { categoryId: bob.categoryId } });
     expect(budgets).toHaveLength(1);
     expect(budgets[0].userId).toBe(bob.id);
-    expect(budgets[0].amount).toBe(600);
+    expect(budgets[0].amountCents).toBe(60_000);
   });
 
   it("PATCH /api/goals/:id on B's goal returns 404", async () => {
@@ -472,12 +472,13 @@ describe("A cannot reach B's data through the AI or the assistant", () => {
     const bobWorth = await getNetWorth(bob.id);
     // Both have one $2,500 account, so equal totals are expected — what
     // matters is that A's figure does not include B's money.
-    expect(aliceWorth.assets).toBe(2500);
-    expect(bobWorth.assets).toBe(2500);
+    expect(aliceWorth.assetsCents).toBe(250_000);
+    expect(bobWorth.assetsCents).toBe(250_000);
 
     const { start, end } = currentMonthRange("America/Los_Angeles");
     const aliceSpend = await getSpendingByCategory(alice.id, start, end);
-    expect(aliceSpend.reduce((sum, c) => sum + c.total, 0)).toBe(84.21);
+    // Exactly $84.21 in cents — not 84.21 plus float dust, and not $168.42.
+    expect(aliceSpend.reduce((sum, c) => sum + c.totalCents, 0)).toBe(8421);
   });
 
   it("assistant actions operate only on A's records", async () => {

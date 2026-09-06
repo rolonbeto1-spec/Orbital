@@ -6,12 +6,18 @@
 //   owner. Query scoping is enforced in code (src/lib/security/*), and this
 //   schema makes the scoping possible and indexable.
 //
-// MONEY: amounts are Float dollars, matching Plaid's own representation and
-//   the historical Metta convention (positive = money out, negative = money
-//   in). All *aggregation* goes through src/lib/money.ts, which sums in
-//   integer cents so repeated addition cannot accumulate binary-float error.
-//   See SECURITY_REVIEW.md §"Money representation" for the rationale and the
-//   residual risk.
+// MONEY: every currency amount is stored as an INTEGER number of cents in a
+//   column named `*Cents`. There is no floating-point persisted money. The
+//   Plaid sign convention is preserved exactly: positive = money out
+//   (spending), negative = money in (income or refund).
+//
+//   Two fields are deliberately NOT integer cents, and both are documented at
+//   their definition: Holding.quantity (a unit count, not currency) and
+//   Holding.priceUsd (a market quote needing sub-cent precision, display-only,
+//   never summed — the summed value is Holding.valueCents).
+//
+//   All arithmetic goes through src/lib/money.ts. Dollars appear only at the
+//   HTTP boundary, converted once for display.
 //
 // PROVIDER: `sqlite` is the committed provider for local development and the
 //   test suite. scripts/vercel-build.js rewrites it to `postgresql` for
@@ -215,8 +221,10 @@ model Account {
   mask             String?
   type             String
   subtype          String?
-  currentBalance   Float   @default(0)
-  availableBalance Float?
+  /// Integer cents. Positive = a positive balance; for a credit card this is
+  /// the amount owed, matching Plaid.
+  currentBalanceCents   Int  @default(0)
+  availableBalanceCents Int?
   isBusiness       Boolean @default(false)
   currencyCode     String  @default("USD")
 
@@ -239,12 +247,23 @@ model Holding {
   accountId String
   account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
-  symbol   String
-  name     String
+  symbol String
+  name   String
+
+  /// NOT currency: a count of units held. Fractional shares and crypto make
+  /// this genuinely non-integer (0.0431 BTC), so it stays a Float.
   quantity Float
-  price    Float
-  value    Float
-  kind     String   @default("stock")
+
+  /// A market quote in dollars. Deliberately NOT integer cents: a token can
+  /// trade at $0.000012, which is not representable in cents at all. This
+  /// value is displayed and never summed or compared for accounting — the
+  /// money figure is valueCents below, computed once at write time.
+  priceUsd Float
+
+  /// Integer cents. This is the monetary value that aggregations use.
+  valueCents Int
+
+  kind      String   @default("stock")
   updatedAt DateTime @updatedAt
 
   @@index([userId])
@@ -260,8 +279,9 @@ model Transaction {
   accountId          String
   account            Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
-  /// Plaid convention: positive = money out (spending), negative = money in.
-  amount        Float
+  /// Integer cents, Plaid convention: positive = money out (spending),
+  /// negative = money in (income or refund).
+  amountCents   Int
   date          DateTime
   name          String
   merchantName  String?
@@ -273,8 +293,10 @@ model Transaction {
   currencyCode  String    @default("USD")
   notes         String?
 
-  owedBack         Boolean @default(false)
-  reimbursedAmount Float   @default(0)
+  owedBack              Boolean @default(false)
+  /// Integer cents already paid back against this charge. Never exceeds
+  /// amountCents; enforced in the API layer.
+  reimbursedAmountCents Int     @default(0)
 
   folderId String?
   folder   Folder? @relation(fields: [folderId], references: [id], onDelete: SetNull)
@@ -335,8 +357,9 @@ model MerchantRule {
   match      String
   categoryId String
   category   Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
-  minAmount  Float?
-  maxAmount  Float?
+  /// Amount-band bounds in integer cents. "$8 at Shell is snacks, $60 is fuel."
+  minAmountCents Int?
+  maxAmountCents Int?
   /// learned | builtin | ai — "learned" (the user's own correction) always wins.
   source     String   @default("learned")
 
@@ -345,7 +368,7 @@ model MerchantRule {
 
   // One rule per (user, merchant match, amount band). Prevents the duplicate
   // rules that concurrent syncs would otherwise create (§48).
-  @@unique([userId, match, minAmount, maxAmount])
+  @@unique([userId, match, minAmountCents, maxAmountCents])
   @@index([userId, match])
 }
 
@@ -356,7 +379,8 @@ model Budget {
 
   categoryId String   @unique
   category   Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
-  amount     Float
+  /// Monthly limit in integer cents.
+  amountCents Int
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -369,14 +393,15 @@ model Property {
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  name       String
-  rentIncome Float   @default(0)
-  mortgage   Float   @default(0)
-  utilities  Float   @default(0)
-  hoa        Float   @default(0)
-  sweatIn    Float   @default(0)
-  sweatOut   Float   @default(0)
-  notes      String?
+  name String
+  /// All integer cents.
+  rentIncomeCents Int @default(0)
+  mortgageCents   Int @default(0)
+  utilitiesCents  Int @default(0)
+  hoaCents        Int @default(0)
+  sweatInCents    Int @default(0)
+  sweatOutCents   Int @default(0)
+  notes String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -389,10 +414,11 @@ model Goal {
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  name          String
-  targetAmount  Float
-  currentAmount Float     @default(0)
-  targetDate    DateTime?
+  name String
+  /// Integer cents.
+  targetAmountCents  Int
+  currentAmountCents Int       @default(0)
+  targetDate         DateTime?
   icon          String    @default("target")
   color         String    @default("#6366f1")
 

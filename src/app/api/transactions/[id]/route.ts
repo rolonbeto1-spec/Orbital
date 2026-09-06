@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { requireOwned, assertOwned, resolveOwnedRef } from "@/lib/security/ownership";
 import { transactionUpdate } from "@/lib/validation";
 import { learnFromCorrection } from "@/lib/smart-categorize";
-import { roundMoney } from "@/lib/money";
+import { dollarsToCents, serializeMoneyFields } from "@/lib/money";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -30,11 +30,11 @@ export const PATCH = route(
     const before = await requireOwned<{
       id: string;
       categoryId: string | null;
-      amount: number;
+      amountCents: number;
       name: string;
       merchantName: string | null;
     }>("transaction", id, ctx.user.id, {
-      select: { id: true, categoryId: true, amount: true, name: true, merchantName: true },
+      select: { id: true, categoryId: true, amountCents: true, name: true, merchantName: true },
     });
 
     const data: {
@@ -42,7 +42,7 @@ export const PATCH = route(
       notes?: string | null;
       folderId?: string | null;
       owedBack?: boolean;
-      reimbursedAmount?: number;
+      reimbursedAmountCents?: number;
     } = {};
 
     if ("categoryId" in ctx.body) {
@@ -77,9 +77,11 @@ export const PATCH = route(
     if ("owedBack" in ctx.body) data.owedBack = Boolean(ctx.body.owedBack);
 
     if (ctx.body.reimbursedAmount !== undefined) {
-      // Never reimburse more than was spent; rounded to the cent (§49).
-      const cap = before.amount > 0 ? before.amount : 0;
-      data.reimbursedAmount = roundMoney(Math.min(Math.max(0, ctx.body.reimbursedAmount), cap));
+      // The request carries dollars; convert once, then clamp in exact cents.
+      // Never reimburse more than was spent (§49).
+      const requestedCents = dollarsToCents(ctx.body.reimbursedAmount);
+      const capCents = before.amountCents > 0 ? before.amountCents : 0;
+      data.reimbursedAmountCents = Math.min(Math.max(0, requestedCents), capCents);
     }
 
     // updateMany with the tenancy in the WHERE clause. Even though ownership
@@ -94,7 +96,7 @@ export const PATCH = route(
       where: { id, userId: ctx.user.id },
       select: {
         id: true,
-        amount: true,
+        amountCents: true,
         date: true,
         name: true,
         merchantName: true,
@@ -103,7 +105,7 @@ export const PATCH = route(
         pending: true,
         notes: true,
         owedBack: true,
-        reimbursedAmount: true,
+        reimbursedAmountCents: true,
         folderId: true,
         category: { select: { id: true, name: true, icon: true, color: true, group: true } },
         folder: { select: { id: true, name: true } },
@@ -117,16 +119,16 @@ export const PATCH = route(
       updated &&
       data.categoryId &&
       data.categoryId !== before.categoryId &&
-      updated.amount > 0
+      updated.amountCents > 0
     ) {
       await learnFromCorrection(
         ctx.user.id,
         updated.merchantName || updated.name,
         data.categoryId,
-        updated.amount,
+        updated.amountCents,
       );
     }
 
-    return safeJson(updated);
+    return safeJson(updated ? serializeMoneyFields(updated) : null);
   },
 );

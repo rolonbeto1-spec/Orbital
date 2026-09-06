@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { route, safeJson } from "@/lib/security/api";
 import { getHive } from "@/lib/hive";
+import { serializeMoneyFields } from "@/lib/money";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,5 +20,7 @@ const query = z
 
 export const GET = route({ auth: "user", limits: ["read"], query }, async (ctx) => {
   const hive = await getHive(ctx.user.id, ctx.user.timezone, ctx.query.window ?? null);
-  return safeJson(hive);
+  // The money boundary: every `*Cents` integer becomes a dollar number here,
+  // once, recursively through branches, items and the budget block (§49).
+  return safeJson(serializeMoneyFields(hive));
 });

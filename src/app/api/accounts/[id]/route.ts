@@ -2,6 +2,7 @@ import { route, safeJson } from "@/lib/security/api";
 import { prisma } from "@/lib/prisma";
 import { requireOwned } from "@/lib/security/ownership";
 import { accountUpdate } from "@/lib/validation";
+import { serializeMoneyFields } from "@/lib/money";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,9 +28,10 @@ export const PATCH = route(
       where: { id, userId: ctx.user.id },
       select: {
         id: true, name: true, mask: true, type: true, subtype: true,
-        currentBalance: true, availableBalance: true, isBusiness: true, currencyCode: true,
+        currentBalanceCents: true, availableBalanceCents: true, isBusiness: true,
+        currencyCode: true,
       },
     });
-    return safeJson(account);
+    return safeJson(account ? serializeMoneyFields(account) : null);
   },
 );

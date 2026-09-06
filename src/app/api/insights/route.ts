@@ -6,6 +6,7 @@ import {
   getNetWorth,
 } from "@/lib/queries";
 import { currentMonthRange, monthRangeInZone, partsInZone } from "@/lib/time";
+import { serializeMoneyFields } from "@/lib/money";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -29,19 +30,23 @@ export const GET = route({ auth: "user", limits: ["report"] }, async (ctx) => {
   ]);
 
   // Attach a vs-last-month trend to each category. For spending, up = bad.
-  const prevMap = new Map(prevByCategory.map((c) => [c.categoryId, c.total]));
+  const prevMap = new Map(prevByCategory.map((c) => [c.categoryId, c.totalCents]));
   const withTrend = byCategory.map((c) => {
-    const prevTotal = prevMap.get(c.categoryId) ?? 0;
+    const prevTotalCents = prevMap.get(c.categoryId) ?? 0;
     const pct =
-      prevTotal > 0 ? Math.round(((c.total - prevTotal) / prevTotal) * 100) : c.total > 0 ? 100 : 0;
-    return { ...c, prevTotal, pct };
+      prevTotalCents > 0
+        ? Math.round(((c.totalCents - prevTotalCents) / prevTotalCents) * 100)
+        : c.totalCents > 0
+          ? 100
+          : 0;
+    return { ...c, prevTotalCents, pct };
   });
 
   return safeJson({
-    cashflow,
-    byCategory: withTrend,
-    trend,
-    netWorth,
+    cashflow: serializeMoneyFields(cashflow),
+    byCategory: withTrend.map((c) => serializeMoneyFields(c)),
+    trend: trend.map((t) => serializeMoneyFields(t)),
+    netWorth: serializeMoneyFields(netWorth),
     // Rendered in the user's zone so the label matches the period it covers.
     month: start.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: timezone }),
   });

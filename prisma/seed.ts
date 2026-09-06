@@ -17,6 +17,7 @@
 import { randomBytes } from "node:crypto";
 import { PrismaClient } from "../src/generated/prisma";
 import { CATEGORIES } from "../src/lib/categories";
+import { dollarsToCents } from "../src/lib/money";
 
 /** The demo account. Fixed id so re-seeding replaces rather than accumulates. */
 const DEMO_USER_ID = "u_demo_local_development";
@@ -84,13 +85,13 @@ const WEIGHTED_SPEND: string[] = Object.entries(SPEND_WEIGHTS).flatMap(
 
 // Recurring monthly bills (day-of-month, merchant, category, amount)
 const RECURRING = [
-  { day: 1, merchant: "Sunset Apartments", category: "Housing", amount: 1850 },
-  { day: 5, merchant: "PG&E", category: "Bills & Utilities", amount: 95 },
-  { day: 8, merchant: "Comcast Xfinity", category: "Bills & Utilities", amount: 79 },
-  { day: 10, merchant: "AT&T Wireless", category: "Bills & Utilities", amount: 68 },
-  { day: 3, merchant: "Netflix", category: "Entertainment", amount: 15.49 },
-  { day: 3, merchant: "Spotify", category: "Entertainment", amount: 11.99 },
-  { day: 15, merchant: "Planet Fitness", category: "Personal Care", amount: 24.99 },
+  { day: 1, merchant: "Sunset Apartments", category: "Housing", dollars: 1850 },
+  { day: 5, merchant: "PG&E", category: "Bills & Utilities", dollars: 95 },
+  { day: 8, merchant: "Comcast Xfinity", category: "Bills & Utilities", dollars: 79 },
+  { day: 10, merchant: "AT&T Wireless", category: "Bills & Utilities", dollars: 68 },
+  { day: 3, merchant: "Netflix", category: "Entertainment", dollars: 15.49 },
+  { day: 3, merchant: "Spotify", category: "Entertainment", dollars: 11.99 },
+  { day: 15, merchant: "Planet Fitness", category: "Personal Care", dollars: 24.99 },
 ];
 
 export async function seedDemo(prisma: PrismaClient) {
@@ -197,8 +198,8 @@ export async function seedDemo(prisma: PrismaClient) {
       mask: "4821",
       type: "depository",
       subtype: "checking",
-      currentBalance: 4287.55,
-      availableBalance: 4187.55,
+      currentBalanceCents: dollarsToCents(4287.55),
+      availableBalanceCents: dollarsToCents(4187.55),
     },
   });
   const savings = await prisma.account.create({
@@ -210,8 +211,8 @@ export async function seedDemo(prisma: PrismaClient) {
       mask: "9033",
       type: "depository",
       subtype: "savings",
-      currentBalance: 15840.12,
-      availableBalance: 15840.12,
+      currentBalanceCents: dollarsToCents(15840.12),
+      availableBalanceCents: dollarsToCents(15840.12),
     },
   });
   const credit = await prisma.account.create({
@@ -223,8 +224,8 @@ export async function seedDemo(prisma: PrismaClient) {
       mask: "1177",
       type: "credit",
       subtype: "credit card",
-      currentBalance: 892.41,
-      availableBalance: 7107.59,
+      currentBalanceCents: dollarsToCents(892.41),
+      availableBalanceCents: dollarsToCents(7107.59),
     },
   });
   const brokerage = await prisma.account.create({
@@ -236,7 +237,7 @@ export async function seedDemo(prisma: PrismaClient) {
       mask: "5520",
       type: "investment",
       subtype: "brokerage",
-      currentBalance: 28450.9,
+      currentBalanceCents: dollarsToCents(28450.9),
     },
   });
   const cryptoWallet = await prisma.account.create({
@@ -248,7 +249,7 @@ export async function seedDemo(prisma: PrismaClient) {
       mask: "0007",
       type: "investment",
       subtype: "crypto exchange",
-      currentBalance: 12994.5,
+      currentBalanceCents: dollarsToCents(12994.5),
     },
   });
   const bizChecking = await prisma.account.create({
@@ -260,7 +261,7 @@ export async function seedDemo(prisma: PrismaClient) {
       mask: "3300",
       type: "depository",
       subtype: "checking",
-      currentBalance: 9412.77,
+      currentBalanceCents: dollarsToCents(9412.77),
       isBusiness: true,
     },
   });
@@ -269,12 +270,12 @@ export async function seedDemo(prisma: PrismaClient) {
   // Brokerage holdings sum to its balance; same for the crypto wallet.
   await prisma.holding.createMany({
     data: [
-      { userId, accountId: brokerage.id, symbol: "VOO", name: "Vanguard S&P 500 ETF", quantity: 30, price: 512.4, value: 15372.0, kind: "etf" },
-      { userId, accountId: brokerage.id, symbol: "AAPL", name: "Apple", quantity: 25, price: 224.5, value: 5612.5, kind: "stock" },
-      { userId, accountId: brokerage.id, symbol: "NVDA", name: "NVIDIA", quantity: 40, price: 131.2, value: 5248.0, kind: "stock" },
-      { userId, accountId: brokerage.id, symbol: "USD", name: "Cash sweep", quantity: 2218.4, price: 1, value: 2218.4, kind: "cash" },
-      { userId, accountId: cryptoWallet.id, symbol: "BTC", name: "Bitcoin", quantity: 0.12, price: 64500, value: 7740.0, kind: "crypto" },
-      { userId, accountId: cryptoWallet.id, symbol: "ETH", name: "Ethereum", quantity: 1.5, price: 3503, value: 5254.5, kind: "crypto" },
+      { userId, accountId: brokerage.id, symbol: "VOO", name: "Vanguard S&P 500 ETF", quantity: 30, priceUsd: 512.4, valueCents: dollarsToCents(15372.0), kind: "etf" },
+      { userId, accountId: brokerage.id, symbol: "AAPL", name: "Apple", quantity: 25, priceUsd: 224.5, valueCents: dollarsToCents(5612.5), kind: "stock" },
+      { userId, accountId: brokerage.id, symbol: "NVDA", name: "NVIDIA", quantity: 40, priceUsd: 131.2, valueCents: dollarsToCents(5248.0), kind: "stock" },
+      { userId, accountId: brokerage.id, symbol: "USD", name: "Cash sweep", quantity: 2218.4, priceUsd: 1, valueCents: dollarsToCents(2218.4), kind: "cash" },
+      { userId, accountId: cryptoWallet.id, symbol: "BTC", name: "Bitcoin", quantity: 0.12, priceUsd: 64500, valueCents: dollarsToCents(7740.0), kind: "crypto" },
+      { userId, accountId: cryptoWallet.id, symbol: "ETH", name: "Ethereum", quantity: 1.5, priceUsd: 3503, valueCents: dollarsToCents(5254.5), kind: "crypto" },
     ],
   });
 
@@ -287,7 +288,7 @@ export async function seedDemo(prisma: PrismaClient) {
       userId: string;
       plaidTransactionId: string;
       accountId: string;
-      amount: number;
+      amountCents: number;
       date: Date;
       name: string;
       merchantName: string;
@@ -303,7 +304,7 @@ export async function seedDemo(prisma: PrismaClient) {
           userId,
       plaidTransactionId: `demo-biz-${bc++}`,
           accountId: bizChecking.id,
-          amount: -round2(rand(1100, 2600)),
+          amountCents: dollarsToCents(-round2(rand(1100, 2600))),
           date,
           name: `${client} Invoice`,
           merchantName: client,
@@ -321,7 +322,7 @@ export async function seedDemo(prisma: PrismaClient) {
             userId,
       plaidTransactionId: `demo-biz-${bc++}`,
             accountId: bizChecking.id,
-            amount: amt,
+            amountCents: dollarsToCents(amt),
             date,
             name: merchant,
             merchantName: merchant,
@@ -335,7 +336,7 @@ export async function seedDemo(prisma: PrismaClient) {
           userId,
       plaidTransactionId: `demo-biz-${bc++}`,
           accountId: bizChecking.id,
-          amount: round2(rand(380, 900)),
+          amountCents: dollarsToCents(round2(rand(380, 900))),
           date,
           name: "Contractor Payout",
           merchantName: "Contractor Payout",
@@ -349,7 +350,7 @@ export async function seedDemo(prisma: PrismaClient) {
           userId,
       plaidTransactionId: `demo-biz-${bc++}`,
           accountId: bizChecking.id,
-          amount: round2(rand(24, 160)),
+          amountCents: dollarsToCents(round2(rand(24, 160))),
           date,
           name: supplier,
           merchantName: supplier,
@@ -367,7 +368,7 @@ export async function seedDemo(prisma: PrismaClient) {
     userId: string;
     plaidTransactionId: string;
     accountId: string;
-    amount: number;
+    amountCents: number;
     date: Date;
     name: string;
     merchantName: string;
@@ -386,7 +387,7 @@ export async function seedDemo(prisma: PrismaClient) {
         userId,
       plaidTransactionId: `demo-tx-${counter++}`,
         accountId: checking.id,
-        amount: -round2(rand(2550, 2700)),
+        amountCents: dollarsToCents(-round2(rand(2550, 2700))),
         date,
         name: "Acme Corp Payroll",
         merchantName: "Acme Corp",
@@ -400,8 +401,8 @@ export async function seedDemo(prisma: PrismaClient) {
         txns.push({
           userId,
       plaidTransactionId: `demo-tx-${counter++}`,
-          accountId: r.amount > 100 ? checking.id : credit.id,
-          amount: round2(r.amount),
+          accountId: r.dollars > 100 ? checking.id : credit.id,
+          amountCents: dollarsToCents(r.dollars),
           date,
           name: r.merchant,
           merchantName: r.merchant,
@@ -416,7 +417,7 @@ export async function seedDemo(prisma: PrismaClient) {
         userId,
       plaidTransactionId: `demo-tx-${counter++}`,
         accountId: checking.id,
-        amount: 500,
+        amountCents: dollarsToCents(500),
         date,
         name: "Transfer to Savings",
         merchantName: "Transfer to Savings",
@@ -443,7 +444,7 @@ export async function seedDemo(prisma: PrismaClient) {
         userId,
       plaidTransactionId: `demo-tx-${counter++}`,
         accountId: pick(spendAccounts),
-        amount,
+        amountCents: dollarsToCents(amount),
         date,
         name: merchant,
         merchantName: merchant,
@@ -467,32 +468,32 @@ export async function seedDemo(prisma: PrismaClient) {
         userId,
       plaidTransactionId: "demo-owed-1",
         accountId: credit.id,
-        amount: 180,
+        amountCents: dollarsToCents(180),
         date: dRecent(16),
         name: "Ticketmaster",
         merchantName: "Ticketmaster",
         categoryId: catId("Entertainment"),
         owedBack: true,
-        reimbursedAmount: 0,
+        reimbursedAmountCents: 0,
         notes: "Concert tickets — Jordan's share",
       },
       {
         userId,
       plaidTransactionId: "demo-owed-2",
         accountId: checking.id,
-        amount: 240,
+        amountCents: dollarsToCents(240),
         date: dRecent(9),
         name: "Group dinner",
         merchantName: "Sushi Ren",
         categoryId: catId("Food & Dining"),
         owedBack: true,
-        reimbursedAmount: 120, // half paid back so far
+        reimbursedAmountCents: 120, // half paid back so far
       },
       {
         userId,
       plaidTransactionId: "demo-repay-1",
         accountId: checking.id,
-        amount: -120,
+        amountCents: dollarsToCents(-120),
         date: dRecent(7),
         name: "Cash App · Jordan",
         merchantName: "Cash App",
@@ -503,25 +504,25 @@ export async function seedDemo(prisma: PrismaClient) {
 
   console.log("Seeding budgets…");
   const budgets = [
-    { name: "Groceries", amount: 600 },
-    { name: "Food & Dining", amount: 400 },
-    { name: "Transportation", amount: 200 },
-    { name: "Shopping", amount: 350 },
-    { name: "Entertainment", amount: 150 },
-    { name: "Bills & Utilities", amount: 350 },
+    { name: "Groceries", dollars: 600 },
+    { name: "Food & Dining", dollars: 400 },
+    { name: "Transportation", dollars: 200 },
+    { name: "Shopping", dollars: 350 },
+    { name: "Entertainment", dollars: 150 },
+    { name: "Bills & Utilities", dollars: 350 },
   ];
   for (const b of budgets) {
     const id = catId(b.name);
-    if (id) await prisma.budget.create({ data: { userId, categoryId: id, amount: b.amount } });
+    if (id) await prisma.budget.create({ data: { userId, categoryId: id, amountCents: dollarsToCents(b.dollars) } });
   }
 
   console.log("Seeding goals…");
   await prisma.goal.createMany({
     data: [
-      { userId, name: "Emergency Fund", targetAmount: 15000, currentAmount: 9200, icon: "PiggyBank", color: "#22c55e" },
-      { userId, name: "Japan Trip", targetAmount: 5000, currentAmount: 1850, icon: "Plane", color: "#06b6d4" },
-      { userId, name: "New Laptop", targetAmount: 2500, currentAmount: 2500, icon: "Target", color: "#6366f1" },
-      { userId, name: "Down Payment", targetAmount: 60000, currentAmount: 18400, icon: "Home", color: "#a855f7" },
+      { userId, name: "Emergency Fund", targetAmountCents: dollarsToCents(15000), currentAmountCents: dollarsToCents(9200), icon: "PiggyBank", color: "#22c55e" },
+      { userId, name: "Japan Trip", targetAmountCents: dollarsToCents(5000), currentAmountCents: dollarsToCents(1850), icon: "Plane", color: "#06b6d4" },
+      { userId, name: "New Laptop", targetAmountCents: dollarsToCents(2500), currentAmountCents: dollarsToCents(2500), icon: "Target", color: "#6366f1" },
+      { userId, name: "Down Payment", targetAmountCents: dollarsToCents(60000), currentAmountCents: dollarsToCents(18400), icon: "Home", color: "#a855f7" },
     ],
   });
 
@@ -531,22 +532,22 @@ export async function seedDemo(prisma: PrismaClient) {
     data: [
       {
         userId, name: "Elm St duplex",
-        rentIncome: 2400,
-        mortgage: 1750,
-        utilities: 180,
-        hoa: 0,
-        sweatIn: 14500,
-        sweatOut: 26400,
+        rentIncomeCents: dollarsToCents(2400),
+        mortgageCents: dollarsToCents(1750),
+        utilitiesCents: dollarsToCents(180),
+        hoaCents: dollarsToCents(0),
+        sweatInCents: dollarsToCents(14500),
+        sweatOutCents: dollarsToCents(26400),
         notes: "Tenants cover it — cash-flows every month.",
       },
       {
         userId, name: "Oak Ave",
-        rentIncome: 1900,
-        mortgage: 1820,
-        utilities: 210,
-        hoa: 95,
-        sweatIn: 9800,
-        sweatOut: 6200,
+        rentIncomeCents: dollarsToCents(1900),
+        mortgageCents: dollarsToCents(1820),
+        utilitiesCents: dollarsToCents(210),
+        hoaCents: dollarsToCents(95),
+        sweatInCents: dollarsToCents(9800),
+        sweatOutCents: dollarsToCents(6200),
         notes: "Under renovation — topping up until rent bumps in the fall.",
       },
     ],

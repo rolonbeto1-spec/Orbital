@@ -3,7 +3,11 @@ import { prisma } from "@/lib/prisma";
 import { getNetWorth } from "@/lib/queries";
 import { currentMonthRange, partsInZone, zonedTimeToUtc } from "@/lib/time";
 import type { AuthedUser } from "@/lib/security/session";
-import { formatCurrency } from "@/lib/format";
+import { formatCurrency as formatDollars } from "@/lib/format";
+import { centsToDollars, sumCentsBy } from "@/lib/money";
+
+/** Answers are user-facing text, so cents become dollars at the format call. */
+const formatCurrency = (cents: number) => formatDollars(centsToDollars(cents));
 import { getBudgetStatus } from "@/lib/budget";
 
 // A small, deterministic question-answering engine over the user's finances.
@@ -96,7 +100,7 @@ function resolveCategories(q: string): { names: string[]; label: string } | null
 // ---- query helpers ----
 async function spendIn(userId: string, names: string[] | null, start: Date, end: Date) {
   const txns = await prisma.transaction.findMany({
-    where: { userId, date: { gte: start, lte: end }, amount: { gt: 0 } },
+    where: { userId, date: { gte: start, lte: end }, amountCents: { gt: 0 } },
     include: { category: { select: { name: true, group: true } } },
     take: 5000,
   });
@@ -107,12 +111,12 @@ async function spendIn(userId: string, names: string[] | null, start: Date, end:
     const group = t.category?.group ?? "expense";
     if (group !== "expense") continue; // exclude transfers/income
     if (names && !(t.category && names.includes(t.category.name))) continue;
-    total += t.amount;
+    total += t.amountCents;
     const cn = t.category?.name ?? "Other";
-    byCat[cn] = (byCat[cn] ?? 0) + t.amount;
+    byCat[cn] = (byCat[cn] ?? 0) + t.amountCents;
     const mn = t.merchantName || t.name;
     byMerchant[mn] = byMerchant[mn] || { total: 0, count: 0 };
-    byMerchant[mn].total += t.amount;
+    byMerchant[mn].total += t.amountCents;
     byMerchant[mn].count++;
   }
   return { total, byCat, byMerchant };
@@ -134,11 +138,11 @@ export async function ask(user: AuthedUser, question: string): Promise<Assistant
   if (/net worth|how much (money )?do i have|total balance|how much am i worth/.test(q)) {
     const nw = await getNetWorth(user.id);
     return {
-      answer: `Your net worth is ${formatCurrency(nw.netWorth)} — ${formatCurrency(nw.assets)} in assets minus ${formatCurrency(nw.liabilities)} in debt.`,
+      answer: `Your net worth is ${formatCurrency(nw.netWorthCents)} — ${formatCurrency(nw.assetsCents)} in assets minus ${formatCurrency(nw.liabilitiesCents)} in debt.`,
       detail: [
-        { label: "Assets", value: formatCurrency(nw.assets) },
-        { label: "Debt", value: formatCurrency(nw.liabilities) },
-        { label: "Net worth", value: formatCurrency(nw.netWorth) },
+        { label: "Assets", value: formatCurrency(nw.assetsCents) },
+        { label: "Debt", value: formatCurrency(nw.liabilitiesCents) },
+        { label: "Net worth", value: formatCurrency(nw.netWorthCents) },
       ],
     };
   }
@@ -146,19 +150,23 @@ export async function ask(user: AuthedUser, question: string): Promise<Assistant
   // income / earnings
   if (/how much did i (make|earn)|my income|got paid|paid this/.test(q)) {
     const txns = await prisma.transaction.findMany({
-      where: { userId: user.id, date: { gte: win.start, lte: win.end }, amount: { lt: 0 } },
+      where: { userId: user.id, date: { gte: win.start, lte: win.end }, amountCents: { lt: 0 } },
       include: { category: { select: { group: true } } },
       take: 5000,
     });
-    const income = txns.filter((t) => t.category?.group === "income").reduce((s, t) => s - t.amount, 0);
+    const income = sumCentsBy(
+      txns.filter((t) => t.category?.group === "income"),
+      (t) => -t.amountCents,
+    );
     return { answer: `You brought in ${formatCurrency(income)} ${win.label}.` };
   }
 
   // budget pace (the user's customizable in-budget set)
   if (/budget|on pace|on track|overspend|spending too much/.test(q)) {
     const status = await getBudgetStatus(user.id, user.timezone);
-    const total = status.spent;
-    const budget = status.limit > 0 ? status.limit : 2000; // fallback target
+    const total = status.spentCents;
+    // Fallback target when no budget is set: $2,000, in cents.
+    const budget = status.limitCents > 0 ? status.limitCents : 200_000;
     const remaining = budget - total;
     const over = remaining < 0;
     return {

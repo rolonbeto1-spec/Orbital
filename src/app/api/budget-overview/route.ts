@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { getSpendingByCategory } from "@/lib/queries";
 import { currentMonthRange } from "@/lib/time";
 import { categoryInBudget } from "@/lib/budget";
-import { sumBy } from "@/lib/money";
+import { sumCentsBy, serializeMoneyFields } from "@/lib/money";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,7 +25,7 @@ export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
     getSpendingByCategory(userId, start, end),
     prisma.budget.findMany({
       where: { userId },
-      select: { id: true, amount: true, category: { select: { name: true } } },
+      select: { id: true, amountCents: true, category: { select: { name: true } } },
     }),
     prisma.category.findMany({
       where: { userId },
@@ -33,7 +33,7 @@ export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
     }),
   ]);
 
-  const spentByCategory = new Map(byCategory.map((c) => [c.name, c.total]));
+  const spentByCategory = new Map(byCategory.map((c) => [c.name, c.totalCents]));
   const budgetByCategory = new Map(budgets.map((b) => [b.category.name, b]));
   const expense = categories.filter((c) => c.group === "expense");
 
@@ -45,24 +45,26 @@ export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
       icon: category.icon,
       color: category.color,
       budgetId: budget?.id ?? null,
-      limit: budget?.amount ?? 0,
-      spent: spentByCategory.get(category.name) ?? 0,
+      limitCents: budget?.amountCents ?? 0,
+      spentCents: spentByCategory.get(category.name) ?? 0,
       inBudget: categoryInBudget(category),
     };
   };
 
   const items = expense.map(toItem);
-  const inBudget = items.filter((i) => i.inBudget).sort((a, b) => b.spent - a.spent);
-  const outOfBudget = items.filter((i) => !i.inBudget).sort((a, b) => b.spent - a.spent);
+  const inBudget = items.filter((i) => i.inBudget).sort((a, b) => b.spentCents - a.spentCents);
+  const outOfBudget = items
+    .filter((i) => !i.inBudget)
+    .sort((a, b) => b.spentCents - a.spentCents);
 
   return safeJson({
-    inBudget,
-    outOfBudget,
-    totals: {
-      limit: sumBy(inBudget, (i) => i.limit),
-      spent: sumBy(inBudget, (i) => i.spent),
-      committed: sumBy(outOfBudget, (i) => i.spent),
-    },
+    inBudget: inBudget.map((i) => serializeMoneyFields(i)),
+    outOfBudget: outOfBudget.map((i) => serializeMoneyFields(i)),
+    totals: serializeMoneyFields({
+      limitCents: sumCentsBy(inBudget, (i) => i.limitCents),
+      spentCents: sumCentsBy(inBudget, (i) => i.spentCents),
+      committedCents: sumCentsBy(outOfBudget, (i) => i.spentCents),
+    }),
     month: start.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: timezone }),
   });
 });

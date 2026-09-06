@@ -4,7 +4,7 @@ import { NEEDS_CATEGORIES, WANTS_CATEGORIES } from "@/lib/buckets";
 import { getBudgetStatus, type BudgetStatus } from "@/lib/budget";
 import { getNetWorth, getCashflow } from "@/lib/queries";
 import { currentMonthRange } from "@/lib/time";
-import { effectiveSpend, sumBy, roundMoney } from "@/lib/money";
+import { effectiveSpendCents, sumCentsBy } from "@/lib/money";
 
 // Data for the honeycomb home screen: your money in the center, branching into
 // Needs / Wants / Investing / Rentals, each with satellite cells. Everything is
@@ -18,21 +18,21 @@ export interface HiveItem {
   kind: "category" | "account" | "property";
   name: string;
   icon: string;
-  value: number; // drives cell size; meaning depends on kind (spend / balance / rent)
+  valueCents: number; // drives cell size; meaning depends on kind (spend / balance / rent)
   display?: string; // optional label override (e.g. balance for accounts)
   categoryId?: string;
   trendPct?: number; // % change vs previous window (categories)
   trendGood?: boolean; // whether the trend/state is good (green) or bad (red)
   property?: {
-    rentIncome: number;
-    mortgage: number;
-    utilities: number;
-    hoa: number;
-    net: number;
-    sweatIn: number;
-    sweatOut: number;
+    rentIncomeCents: number;
+    mortgageCents: number;
+    utilitiesCents: number;
+    hoaCents: number;
+    netCents: number;
+    sweatInCents: number;
+    sweatOutCents: number;
   };
-  balance?: number;
+  balanceCents?: number;
   isBusiness?: boolean;
 }
 
@@ -41,7 +41,7 @@ export interface HiveBranch {
   label: string;
   icon: string;
   blurb: string;
-  value: number;
+  valueCents: number;
   pct: number;
   items: HiveItem[];
 }
@@ -141,12 +141,14 @@ export async function getHive(
   const inWindow = txns.filter((t) => t.date >= win.start && t.date <= win.end);
   const inPrev = txns.filter((t) => t.date >= win.prevStart && t.date <= win.prevEnd);
 
-  // Summed in integer cents via sumBy, so a busy window does not accumulate
-  // float error across thousands of charges (§49).
+  // Every figure below is exact integer cents (§49).
   const spendOf = (list: typeof txns, name: string) =>
-    sumBy(
-      list.filter((t) => t.category?.name === name && t.amount > 0),
-      (t) => (t.owedBack ? effectiveSpend(t.amount, t.reimbursedAmount) : t.amount),
+    sumCentsBy(
+      list.filter((t) => t.category?.name === name && t.amountCents > 0),
+      (t) =>
+        t.owedBack
+          ? effectiveSpendCents(t.amountCents, t.reimbursedAmountCents)
+          : t.amountCents,
     );
 
   const catByName = new Map(categories.map((c) => [c.name, c]));
@@ -164,14 +166,14 @@ export async function getHive(
           kind: "category" as const,
           name,
           icon: cat?.icon ?? "CircleHelp",
-          value: cur,
+          valueCents: cur,
           categoryId: cat?.id,
           trendPct: flat ? undefined : pct,
           trendGood: flat ? undefined : cur < prev, // less spending = good
         };
       })
-      .filter((i) => i.value > 0)
-      .sort((a, b) => b.value - a.value);
+      .filter((i) => i.valueCents > 0)
+      .sort((a, b) => b.valueCents - a.valueCents);
   }
 
   const needsItems = categoryItems(NEEDS_CATEGORIES);
@@ -181,9 +183,13 @@ export async function getHive(
   // categorized at all — shows as one cell under Wants (matching the budget's
   // default treatment) instead of silently vanishing from the hive.
   const uncatOf = (list: typeof txns) =>
-    list
-      .filter((t) => !t.category && t.amount > 0)
-      .reduce((s, t) => s + (t.owedBack ? Math.max(0, t.amount - t.reimbursedAmount) : t.amount), 0);
+    sumCentsBy(
+      list.filter((t) => !t.category && t.amountCents > 0),
+      (t) =>
+        t.owedBack
+          ? effectiveSpendCents(t.amountCents, t.reimbursedAmountCents)
+          : t.amountCents,
+    );
   const otherCur = spendOf(inWindow, "Other") + uncatOf(inWindow);
   const otherPrev = spendOf(inPrev, "Other") + uncatOf(inPrev);
   if (otherCur > 0) {
@@ -195,21 +201,22 @@ export async function getHive(
       kind: "category" as const,
       name: "Other",
       icon: otherCat?.icon ?? "CircleHelp",
-      value: otherCur,
+      valueCents: otherCur,
       categoryId: otherCat?.id,
       trendPct: flat ? undefined : pct,
       trendGood: flat ? undefined : otherCur < otherPrev,
     });
-    wantsItems.sort((a, b) => b.value - a.value);
+    wantsItems.sort((a, b) => b.valueCents - a.valueCents);
   }
 
-  const needsTotal = needsItems.reduce((s, i) => s + i.value, 0);
-  const wantsTotal = wantsItems.reduce((s, i) => s + i.value, 0);
+  const needsTotal = sumCentsBy(needsItems, (i) => i.valueCents);
+  const wantsTotal = sumCentsBy(wantsItems, (i) => i.valueCents);
 
   // Investing flow: money moved out via transfers this window (e.g. to savings).
-  const investFlow = inWindow
-    .filter((t) => t.category?.group === "transfer" && t.amount > 0)
-    .reduce((s, t) => s + t.amount, 0);
+  const investFlow = sumCentsBy(
+    inWindow.filter((t) => t.category?.group === "transfer" && t.amountCents > 0),
+    (t) => t.amountCents,
+  );
   // Satellites: savings + investment accounts — and business accounts, which
   // live here too and open their own breakdown.
   const investAccounts = accounts.filter(
@@ -227,38 +234,40 @@ export async function getHive(
           : a.type === "investment"
             ? "TrendingUp"
             : "PiggyBank",
-      value: a.currentBalance,
-      balance: a.currentBalance,
+      valueCents: a.currentBalanceCents,
+      balanceCents: a.currentBalanceCents,
       trendGood: true,
       isBusiness: a.isBusiness,
     }))
-    .sort((a, b) => b.value - a.value);
+    .sort((a, b) => b.valueCents - a.valueCents);
   const investTotal = investFlow;
 
   // Rentals: cells are houses; branch value is the monthly outflow they carry.
   const rentalItems: HiveItem[] = properties.map((p) => {
-    const net = p.rentIncome - p.mortgage - p.utilities - p.hoa;
+    const netCents =
+      p.rentIncomeCents - p.mortgageCents - p.utilitiesCents - p.hoaCents;
     return {
       id: `prop:${p.id}`,
       kind: "property" as const,
       name: p.name,
       icon: "Home",
-      value: Math.max(p.rentIncome, 1),
-      trendGood: net >= 0,
+      // A house with no rent still deserves a visible cell, hence the floor.
+      valueCents: Math.max(p.rentIncomeCents, 1),
+      trendGood: netCents >= 0,
       property: {
-        rentIncome: p.rentIncome,
-        mortgage: p.mortgage,
-        utilities: p.utilities,
-        hoa: p.hoa,
-        net,
-        sweatIn: p.sweatIn,
-        sweatOut: p.sweatOut,
+        rentIncomeCents: p.rentIncomeCents,
+        mortgageCents: p.mortgageCents,
+        utilitiesCents: p.utilitiesCents,
+        hoaCents: p.hoaCents,
+        netCents,
+        sweatInCents: p.sweatInCents,
+        sweatOutCents: p.sweatOutCents,
       },
     };
   });
-  const rentalsOutflow = properties.reduce(
-    (s, p) => s + p.mortgage + p.utilities + p.hoa,
-    0
+  const rentalsOutflow = sumCentsBy(
+    properties,
+    (p) => p.mortgageCents + p.utilitiesCents + p.hoaCents,
   );
 
   const branchesRaw: HiveBranch[] = [
@@ -267,7 +276,7 @@ export async function getHive(
       label: "Needs",
       icon: "Home",
       blurb: "Has to go out",
-      value: needsTotal,
+      valueCents: needsTotal,
       pct: 0,
       items: needsItems,
     },
@@ -276,7 +285,7 @@ export async function getHive(
       label: "Wants",
       icon: "Sparkles",
       blurb: "You control these",
-      value: wantsTotal,
+      valueCents: wantsTotal,
       pct: 0,
       items: wantsItems,
     },
@@ -285,7 +294,7 @@ export async function getHive(
       label: "Investing",
       icon: "TrendingUp",
       blurb: "Growing your money",
-      value: investTotal,
+      valueCents: investTotal,
       pct: 0,
       items: investItems,
     },
@@ -294,16 +303,18 @@ export async function getHive(
       label: "Rentals",
       icon: "Building2",
       blurb: "Property P&L",
-      value: rentalsOutflow,
+      valueCents: rentalsOutflow,
       pct: 0,
       items: rentalItems,
     },
   ];
 
   // Hide branches with nothing to show; percentages over what remains.
-  const branches = branchesRaw.filter((b) => b.value > 0 || b.items.length > 0);
-  const total = branches.reduce((s, b) => s + b.value, 0);
-  for (const b of branches) b.pct = total > 0 ? Math.round((b.value / total) * 100) : 0;
+  const branches = branchesRaw.filter((b) => b.valueCents > 0 || b.items.length > 0);
+  const totalCents = sumCentsBy(branches, (b) => b.valueCents);
+  for (const b of branches) {
+    b.pct = totalCents > 0 ? Math.round((b.valueCents / totalCents) * 100) : 0;
+  }
 
   // Budget takes center stage; total money becomes its own cell with an
   // up/down read from this month's net cashflow.
@@ -316,13 +327,13 @@ export async function getHive(
 
   return {
     windowLabel: win.label,
-    total,
+    totalCents,
     branches,
     budget,
     money: {
-      total: netWorth.netWorth,
-      trueAvailable: netWorth.trueAvailable,
-      monthNet: roundMoney(monthFlow.net),
+      totalCents: netWorth.netWorthCents,
+      trueAvailableCents: netWorth.trueAvailableCents,
+      monthNetCents: monthFlow.netCents,
     },
   };
 }
@@ -330,7 +341,8 @@ export async function getHive(
 export type { BudgetStatus };
 
 export interface HiveMoney {
-  total: number;
-  trueAvailable: number;
-  monthNet: number; // this month's income minus spending — the up/down signal
+  totalCents: number;
+  trueAvailableCents: number;
+  /** This month's income minus spending — the up/down signal. Exact cents. */
+  monthNetCents: number;
 }

@@ -1,5 +1,6 @@
 import "server-only";
 import { prisma } from "@/lib/prisma";
+import { medianCents, scaleCents } from "@/lib/money";
 
 // Detects merchants that charge on a schedule — subscriptions, bills, rent.
 // A merchant qualifies when it has 3+ charges at a near-regular interval
@@ -13,8 +14,8 @@ export interface RecurringCharge {
   categoryIcon: string | null;
   categoryColor: string | null;
   cadence: "weekly" | "biweekly" | "monthly";
-  amount: number; // typical (median) charge
-  monthlyCost: number; // normalized to per-month
+  amountCents: number; // typical (median) charge, exact cents
+  monthlyCostCents: number; // normalized to per-month, exact cents
   lastDate: string; // ISO date of most recent charge
   nextExpected: string; // ISO date estimate
   count: number;
@@ -26,11 +27,7 @@ const CADENCES = [
   { name: "monthly" as const, days: 30.4, tol: 6, perMonth: 1 },
 ];
 
-function median(nums: number[]): number {
-  const s = [...nums].sort((a, b) => a - b);
-  const mid = Math.floor(s.length / 2);
-  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
-}
+
 
 /**
  * Detect recurring charges for ONE user.
@@ -48,7 +45,7 @@ export async function detectRecurring(userId: string): Promise<RecurringCharge[]
     where: {
       userId,
       date: { gte: since },
-      amount: { gt: 0 },
+      amountCents: { gt: 0 },
       account: { isBusiness: false },
     },
     include: { category: { select: { name: true, icon: true, color: true, group: true } } },
@@ -69,17 +66,20 @@ export async function detectRecurring(userId: string): Promise<RecurringCharge[]
   for (const [merchant, list] of byMerchant) {
     if (list.length < 3) continue;
 
-    const amounts = list.map((t) => t.amount);
-    const med = median(amounts);
-    // Steady price: most charges within 20% of the median (or a few dollars).
-    const steady = amounts.filter((a) => Math.abs(a - med) <= Math.max(med * 0.2, 3));
+    const amounts = list.map((t) => t.amountCents);
+    const medCents = medianCents(amounts);
+    // Steady price: most charges within 20% of the median (or $3).
+    const steady = amounts.filter(
+      (a) => Math.abs(a - medCents) <= Math.max(medCents * 0.2, 300),
+    );
     if (steady.length < 3) continue;
 
     const gaps: number[] = [];
     for (let i = 1; i < list.length; i++) {
       gaps.push((list[i].date.getTime() - list[i - 1].date.getTime()) / 86_400_000);
     }
-    const medGap = median(gaps);
+    const sortedGaps = [...gaps].sort((a, b) => a - b);
+    const medGap = sortedGaps[Math.floor(sortedGaps.length / 2)];
     const cadence = CADENCES.find((c) => Math.abs(medGap - c.days) <= c.tol);
     if (!cadence) continue;
     // Cadence must be consistent, not just a median artifact.
@@ -97,13 +97,14 @@ export async function detectRecurring(userId: string): Promise<RecurringCharge[]
       categoryIcon: last.category?.icon ?? null,
       categoryColor: last.category?.color ?? null,
       cadence: cadence.name,
-      amount: Math.round(med * 100) / 100,
-      monthlyCost: Math.round(med * cadence.perMonth * 100) / 100,
+      amountCents: medCents,
+      // Normalised to a monthly figure, rounded once to an exact cent.
+      monthlyCostCents: scaleCents(medCents, cadence.perMonth),
       lastDate: last.date.toISOString(),
       nextExpected: next.toISOString(),
       count: list.length,
     });
   }
 
-  return out.sort((a, b) => b.monthlyCost - a.monthlyCost);
+  return out.sort((a, b) => b.monthlyCostCents - a.monthlyCostCents);
 }

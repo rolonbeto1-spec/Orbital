@@ -6,7 +6,7 @@ import { getIcon } from "@/lib/icons";
 import { formatCurrency } from "@/lib/format";
 import { NEEDS_CATEGORIES } from "@/lib/buckets";
 import { AccountFilter, ALL_ACCOUNTS, scopeParams, type AccountScope } from "@/components/AccountFilter";
-import type { HiveBranch, HiveItem } from "@/lib/hive";
+import type { HiveBranchWire as HiveBranch, HiveItemWire as HiveItem } from "@/lib/types";
 import type { HiveData, HiveSelection } from "@/components/hive/HiveCanvas";
 import type { Transaction } from "@/lib/types";
 

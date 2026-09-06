@@ -112,8 +112,8 @@ CREATE TABLE "Account" (
     "mask" TEXT,
     "type" TEXT NOT NULL,
     "subtype" TEXT,
-    "currentBalance" DOUBLE PRECISION NOT NULL DEFAULT 0,
-    "availableBalance" DOUBLE PRECISION,
+    "currentBalanceCents" INTEGER NOT NULL DEFAULT 0,
+    "availableBalanceCents" INTEGER,
     "isBusiness" BOOLEAN NOT NULL DEFAULT false,
     "currencyCode" TEXT NOT NULL DEFAULT 'USD',
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -130,8 +130,8 @@ CREATE TABLE "Holding" (
     "symbol" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "quantity" DOUBLE PRECISION NOT NULL,
-    "price" DOUBLE PRECISION NOT NULL,
-    "value" DOUBLE PRECISION NOT NULL,
+    "priceUsd" DOUBLE PRECISION NOT NULL,
+    "valueCents" INTEGER NOT NULL,
     "kind" TEXT NOT NULL DEFAULT 'stock',
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -144,7 +144,7 @@ CREATE TABLE "Transaction" (
     "userId" TEXT NOT NULL,
     "plaidTransactionId" TEXT NOT NULL,
     "accountId" TEXT NOT NULL,
-    "amount" DOUBLE PRECISION NOT NULL,
+    "amountCents" INTEGER NOT NULL,
     "date" TIMESTAMP(3) NOT NULL,
     "name" TEXT NOT NULL,
     "merchantName" TEXT,
@@ -155,7 +155,7 @@ CREATE TABLE "Transaction" (
     "currencyCode" TEXT NOT NULL DEFAULT 'USD',
     "notes" TEXT,
     "owedBack" BOOLEAN NOT NULL DEFAULT false,
-    "reimbursedAmount" DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "reimbursedAmountCents" INTEGER NOT NULL DEFAULT 0,
     "folderId" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
@@ -191,8 +191,8 @@ CREATE TABLE "MerchantRule" (
     "userId" TEXT NOT NULL,
     "match" TEXT NOT NULL,
     "categoryId" TEXT NOT NULL,
-    "minAmount" DOUBLE PRECISION,
-    "maxAmount" DOUBLE PRECISION,
+    "minAmountCents" INTEGER,
+    "maxAmountCents" INTEGER,
     "source" TEXT NOT NULL DEFAULT 'learned',
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
@@ -205,7 +205,7 @@ CREATE TABLE "Budget" (
     "id" TEXT NOT NULL,
     "userId" TEXT NOT NULL,
     "categoryId" TEXT NOT NULL,
-    "amount" DOUBLE PRECISION NOT NULL,
+    "amountCents" INTEGER NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -217,12 +217,12 @@ CREATE TABLE "Property" (
     "id" TEXT NOT NULL,
     "userId" TEXT NOT NULL,
     "name" TEXT NOT NULL,
-    "rentIncome" DOUBLE PRECISION NOT NULL DEFAULT 0,
-    "mortgage" DOUBLE PRECISION NOT NULL DEFAULT 0,
-    "utilities" DOUBLE PRECISION NOT NULL DEFAULT 0,
-    "hoa" DOUBLE PRECISION NOT NULL DEFAULT 0,
-    "sweatIn" DOUBLE PRECISION NOT NULL DEFAULT 0,
-    "sweatOut" DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "rentIncomeCents" INTEGER NOT NULL DEFAULT 0,
+    "mortgageCents" INTEGER NOT NULL DEFAULT 0,
+    "utilitiesCents" INTEGER NOT NULL DEFAULT 0,
+    "hoaCents" INTEGER NOT NULL DEFAULT 0,
+    "sweatInCents" INTEGER NOT NULL DEFAULT 0,
+    "sweatOutCents" INTEGER NOT NULL DEFAULT 0,
     "notes" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
@@ -235,8 +235,8 @@ CREATE TABLE "Goal" (
     "id" TEXT NOT NULL,
     "userId" TEXT NOT NULL,
     "name" TEXT NOT NULL,
-    "targetAmount" DOUBLE PRECISION NOT NULL,
-    "currentAmount" DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "targetAmountCents" INTEGER NOT NULL,
+    "currentAmountCents" INTEGER NOT NULL DEFAULT 0,
     "targetDate" TIMESTAMP(3),
     "icon" TEXT NOT NULL DEFAULT 'target',
     "color" TEXT NOT NULL DEFAULT '#6366f1',
@@ -387,7 +387,7 @@ CREATE UNIQUE INDEX "Category_userId_name_key" ON "Category"("userId", "name");
 CREATE INDEX "MerchantRule_userId_match_idx" ON "MerchantRule"("userId", "match");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "MerchantRule_userId_match_minAmount_maxAmount_key" ON "MerchantRule"("userId", "match", "minAmount", "maxAmount");
+CREATE UNIQUE INDEX "MerchantRule_userId_match_minAmountCents_maxAmountCents_key" ON "MerchantRule"("userId", "match", "minAmountCents", "maxAmountCents");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Budget_categoryId_key" ON "Budget"("categoryId");

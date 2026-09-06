@@ -8,7 +8,7 @@ import {
 } from "@/lib/queries";
 import { currentMonthRange } from "@/lib/time";
 import { plaidConfigured } from "@/lib/plaid";
-import { subtractMoney } from "@/lib/money";
+import { serializeMoneyFields } from "@/lib/money";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -33,9 +33,10 @@ export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
         where: { userId },
         select: {
           id: true, name: true, mask: true, type: true, subtype: true,
-          currentBalance: true, availableBalance: true, isBusiness: true, currencyCode: true,
+          currentBalanceCents: true, availableBalanceCents: true, isBusiness: true,
+          currencyCode: true,
         },
-        orderBy: { currentBalance: "desc" },
+        orderBy: { currentBalanceCents: "desc" },
       }),
       getBudgetsWithSpend(userId, timezone),
       getSpendingByCategory(userId, start, end),
@@ -44,7 +45,7 @@ export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
         orderBy: { date: "desc" },
         take: 6,
         select: {
-          id: true, amount: true, date: true, name: true, merchantName: true,
+          id: true, amountCents: true, date: true, name: true, merchantName: true,
           logoUrl: true, pending: true,
           category: { select: { id: true, name: true, icon: true, color: true, group: true } },
           account: { select: { name: true, mask: true } },
@@ -58,23 +59,24 @@ export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
   const properties = propertiesRaw.map((property) => ({
     id: property.id,
     name: property.name,
-    net: subtractMoney(
-      property.rentIncome,
-      property.mortgage + property.utilities + property.hoa,
-    ),
+    netCents:
+      property.rentIncomeCents -
+      property.mortgageCents -
+      property.utilitiesCents -
+      property.hoaCents,
   }));
 
   return safeJson({
-    netWorth,
-    cashflow,
-    accounts,
-    budgets: budgets.slice(0, 4),
-    topCategories: byCategory.slice(0, 5),
-    recent,
-    goals,
+    netWorth: serializeMoneyFields(netWorth),
+    cashflow: serializeMoneyFields(cashflow),
+    accounts: accounts.map((a) => serializeMoneyFields(a)),
+    budgets: budgets.slice(0, 4).map((b) => serializeMoneyFields(b)),
+    topCategories: byCategory.slice(0, 5).map((c) => serializeMoneyFields(c)),
+    recent: recent.map((t) => serializeMoneyFields(t)),
+    goals: goals.map((g) => serializeMoneyFields(g)),
     month: start.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: timezone }),
     connectedBanks: itemCount,
     plaidConfigured,
-    properties,
+    properties: properties.map((p) => serializeMoneyFields(p)),
   });
 });

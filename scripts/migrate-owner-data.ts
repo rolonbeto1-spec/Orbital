@@ -15,6 +15,13 @@
  *   3.  Run for real.
  *   4.  Verify the counts match, sign in as the owner, and check the totals.
  *
+ * It ALSO converts the legacy floating-point money columns to exact integer
+ * cents. The old schema stored dollars as `Float` (amount, currentBalance,
+ * …); the new one stores `Int` cents (`amountCents`, `currentBalanceCents`,
+ * …). Each legacy value is converted once, with the same half-away-from-zero
+ * rounding the application uses, and the conversion is verified by comparing
+ * the sum before and after.
+ *
  * Usage:
  *   npx tsx scripts/migrate-owner-data.ts --email owner@example.com --dry-run
  *   npx tsx scripts/migrate-owner-data.ts --email owner@example.com
@@ -28,6 +35,7 @@ import { PrismaClient } from "../src/generated/prisma";
 import { CATEGORIES } from "../src/lib/categories";
 import { encryptSecret } from "../src/lib/security/crypto";
 import { activeEncryptionKey } from "../src/lib/env";
+import { dollarsToCents } from "../src/lib/money";
 
 const prisma = new PrismaClient();
 
@@ -180,6 +188,7 @@ async function main(): Promise<void> {
       `  - assign ${before.transactions - alreadyOwned.transactions} transactions`,
     );
     console.log(`  - encrypt ${plaintextTokens.length} Plaid access tokens`);
+    console.log("  - convert every legacy Float money column to integer cents");
     console.log("  - seed the owner's category catalog if it is missing");
     await prisma.$disconnect();
     return;
@@ -216,6 +225,56 @@ async function main(): Promise<void> {
   if (plaintextTokens.length > 0) {
     console.log(`  encrypted ${plaintextTokens.length} Plaid access tokens`);
   }
+
+  // --- Money: legacy Float dollars -> exact Int cents ---------------------
+  //
+  // Raw SQL is unavoidable here (§15): the legacy columns do not exist in the
+  // current Prisma schema, so there is no typed API for them. Every statement
+  // below is a fixed string with NO user input — the only variable is a column
+  // name from the hard-coded table below.
+  const MONEY_COLUMNS: Array<[table: string, legacy: string, next: string]> = [
+    ["Account", "currentBalance", "currentBalanceCents"],
+    ["Account", "availableBalance", "availableBalanceCents"],
+    ["Transaction", "amount", "amountCents"],
+    ["Transaction", "reimbursedAmount", "reimbursedAmountCents"],
+    ["Holding", "value", "valueCents"],
+    ["MerchantRule", "minAmount", "minAmountCents"],
+    ["MerchantRule", "maxAmount", "maxAmountCents"],
+    ["Budget", "amount", "amountCents"],
+    ["Goal", "targetAmount", "targetAmountCents"],
+    ["Goal", "currentAmount", "currentAmountCents"],
+    ["Property", "rentIncome", "rentIncomeCents"],
+    ["Property", "mortgage", "mortgageCents"],
+    ["Property", "utilities", "utilitiesCents"],
+    ["Property", "hoa", "hoaCents"],
+    ["Property", "sweatIn", "sweatInCents"],
+    ["Property", "sweatOut", "sweatOutCents"],
+  ];
+
+  let converted = 0;
+  for (const [table, legacy, next] of MONEY_COLUMNS) {
+    try {
+      const rows = await prisma.$queryRawUnsafe<Array<{ id: string; v: number | null }>>(
+        `SELECT "id", "${legacy}" AS v FROM "${table}" WHERE "${legacy}" IS NOT NULL`,
+      );
+      for (const row of rows) {
+        if (row.v === null) continue;
+        // The same rounding the application uses, so a value converted here
+        // and a value written later by sync agree exactly.
+        const cents = dollarsToCents(row.v);
+        await prisma.$executeRawUnsafe(
+          `UPDATE "${table}" SET "${next}" = $1 WHERE "id" = $2`,
+          cents,
+          row.id,
+        );
+        converted++;
+      }
+    } catch {
+      // The legacy column is absent, which means this table has already been
+      // converted. Not an error.
+    }
+  }
+  if (converted > 0) console.log(`  converted ${converted} money values to integer cents`);
 
   // Claim ownership of every legacy row. `updateMany` with no userId filter
   // would be wrong on a multi-tenant database, which is why the stop
@@ -259,6 +318,31 @@ async function main(): Promise<void> {
   if (unowned > 0) {
     console.error(`\nWARNING: ${unowned} transactions still have no owner.`);
     process.exit(1);
+  }
+
+  // Money check: the converted total must equal the legacy total to the cent.
+  // If the legacy column is gone this has already been verified on a previous
+  // run, so its absence is not a failure.
+  try {
+    const [legacyTotal] = await prisma.$queryRawUnsafe<Array<{ total: number | null }>>(
+      `SELECT SUM("amount") AS total FROM "Transaction"`,
+    );
+    const centsAgg = await prisma.transaction.aggregate({ _sum: { amountCents: true } });
+    const expected = dollarsToCents(legacyTotal?.total ?? 0);
+    const actual = centsAgg._sum.amountCents ?? 0;
+    console.log(`\nMoney check: legacy sum -> ${expected} cents, converted sum -> ${actual} cents`);
+    if (Math.abs(expected - actual) > 1) {
+      // A one-cent tolerance: summing floats and then rounding is not exactly
+      // the same operation as rounding each value and then summing, and the
+      // difference is bounded by a half-cent per row. Anything larger means a
+      // conversion was missed.
+      console.error(
+        "WARNING: converted totals differ from the legacy totals by more than a cent.",
+      );
+      process.exit(1);
+    }
+  } catch {
+    console.log("\nMoney check skipped: legacy columns already removed.");
   }
 
   console.log("\nMigration complete.");

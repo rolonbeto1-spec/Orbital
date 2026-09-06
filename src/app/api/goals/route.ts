@@ -1,6 +1,7 @@
 import { route, safeJson } from "@/lib/security/api";
 import { prisma } from "@/lib/prisma";
 import { goalCreate } from "@/lib/validation";
+import { dollarsToCents, serializeMoneyFields } from "@/lib/money";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,7 +11,7 @@ export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
     where: { userId: ctx.user.id },
     orderBy: { createdAt: "asc" },
   });
-  return safeJson({ goals });
+  return safeJson({ goals: goals.map((g) => serializeMoneyFields(g)) });
 });
 
 export const POST = route(
@@ -26,13 +27,13 @@ export const POST = route(
       data: {
         userId: ctx.user.id,
         name: ctx.body.name,
-        targetAmount: ctx.body.targetAmount,
-        currentAmount: ctx.body.currentAmount ?? 0,
+        targetAmountCents: dollarsToCents(ctx.body.targetAmount),
+        currentAmountCents: dollarsToCents(ctx.body.currentAmount ?? 0),
         targetDate: ctx.body.targetDate ? new Date(ctx.body.targetDate) : null,
         icon: ctx.body.icon ?? "target",
         color: ctx.body.color ?? "#6366f1",
       },
     });
-    return safeJson(goal);
+    return safeJson(serializeMoneyFields(goal));
   },
 );

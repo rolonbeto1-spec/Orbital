@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { ownedBy } from "@/lib/security/ownership";
 import { transactionListQuery } from "@/lib/validation";
 import { parseMonthKey, trailingDays } from "@/lib/time";
+import { dollarsToCents, serializeMoneyFields } from "@/lib/money";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -51,11 +52,14 @@ export const GET = route(
         { merchantName: { contains: search } },
         { notes: { contains: search } },
       ];
-      // "44.74" or "$44.74" also finds the purchase by amount.
+      // "44.74" or "$44.74" also finds the purchase by amount. With integer
+      // cents this is an exact equality rather than the epsilon window a float
+      // column needed — searching for 44.74 now finds exactly 4474 cents.
       const asAmount = Number.parseFloat(search.replace(/[$,]/g, ""));
       if (Number.isFinite(asAmount) && asAmount > 0) {
-        or.push({ amount: { gte: asAmount - 0.005, lte: asAmount + 0.005 } });
-        or.push({ amount: { gte: -asAmount - 0.005, lte: -asAmount + 0.005 } });
+        const cents = dollarsToCents(asAmount);
+        or.push({ amountCents: cents });
+        or.push({ amountCents: -cents });
       }
       where.OR = or;
     }
@@ -68,7 +72,7 @@ export const GET = route(
         // row (§59).
         select: {
           id: true,
-          amount: true,
+          amountCents: true,
           date: true,
           name: true,
           merchantName: true,
@@ -78,7 +82,7 @@ export const GET = route(
           currencyCode: true,
           notes: true,
           owedBack: true,
-          reimbursedAmount: true,
+          reimbursedAmountCents: true,
           folderId: true,
           category: { select: { id: true, name: true, icon: true, color: true, group: true } },
           account: { select: { name: true, mask: true } },
@@ -90,6 +94,13 @@ export const GET = route(
       prisma.transaction.count({ where }),
     ]);
 
-    return safeJson({ transactions, total, limit, offset });
+    // The money boundary: `*Cents` integers become dollar numbers here, once,
+    // for display. Everything above this line was exact (§49).
+    return safeJson({
+      transactions: transactions.map((t) => serializeMoneyFields(t)),
+      total,
+      limit,
+      offset,
+    });
   },
 );

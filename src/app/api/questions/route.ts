@@ -6,6 +6,7 @@ import { requireOwned } from "@/lib/security/ownership";
 import { learnFromCorrection } from "@/lib/smart-categorize";
 import { detectRecurring } from "@/lib/recurring";
 import { idSchema, shortText } from "@/lib/validation";
+import { serializeMoneyFields } from "@/lib/money";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -51,13 +52,13 @@ export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
   const mysteries = await prisma.transaction.findMany({
     where: {
       userId,
-      amount: { gt: 0 },
+      amountCents: { gt: 0 },
       date: { gte: since },
       OR: [{ categoryId: null }, { category: { name: "Other" } }],
     },
-    orderBy: { amount: "desc" },
+    orderBy: { amountCents: "desc" },
     take: 12,
-    select: { id: true, name: true, merchantName: true, amount: true, date: true },
+    select: { id: true, name: true, merchantName: true, amountCents: true, date: true },
   });
 
   const chargeQuestions = mysteries
@@ -67,7 +68,7 @@ export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
       kind: "charge" as const,
       txnId: t.id,
       merchant: t.merchantName || t.name,
-      amount: t.amount,
+      amountCents: t.amountCents,
       date: t.date,
     }));
 
@@ -78,9 +79,9 @@ export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
     .map((r) => ({
       kind: "recurring" as const,
       merchant: r.merchant,
-      amount: r.amount,
+      amountCents: r.amountCents,
       cadence: r.cadence,
-      monthlyCost: r.monthlyCost,
+      monthlyCostCents: r.monthlyCostCents,
     }));
 
   const digestLast = await getSetting(userId, DIGEST_KEY);
@@ -90,8 +91,8 @@ export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
   return safeJson({
     questions: [
       ...(digestDue ? [{ kind: "digest" as const }] : []),
-      ...chargeQuestions,
-      ...recurringQuestions,
+      ...chargeQuestions.map((q) => serializeMoneyFields(q)),
+      ...recurringQuestions.map((q) => serializeMoneyFields(q)),
     ],
   });
 });
@@ -130,9 +131,9 @@ export const POST = route(
           id: string;
           name: string;
           merchantName: string | null;
-          amount: number;
+          amountCents: number;
         }>("transaction", ctx.body.txnId, userId, {
-          select: { id: true, name: true, merchantName: true, amount: true },
+          select: { id: true, name: true, merchantName: true, amountCents: true },
         });
 
         await prisma.transaction.updateMany({
@@ -145,7 +146,7 @@ export const POST = route(
           userId,
           txn.merchantName || txn.name,
           categoryId,
-          txn.amount,
+          txn.amountCents,
         );
       }
 

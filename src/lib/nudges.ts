@@ -3,8 +3,11 @@ import { prisma } from "@/lib/prisma";
 import { getReimbursements } from "@/lib/queries";
 import { getBudgetStatus } from "@/lib/budget";
 import { getAlertPrefs } from "@/lib/alert-prefs";
-import { formatCurrency, formatDateShort } from "@/lib/format";
-import { sumBy, subtractMoney } from "@/lib/money";
+import { formatCurrency as formatDollars, formatDateShort } from "@/lib/format";
+
+/** Nudge text is user-facing, so cents are formatted as dollars here. */
+const formatCurrency = (cents: number) => formatDollars(centsToDollars(cents));
+import { sumCentsBy, centsToDollars } from "@/lib/money";
 import { partsInZone } from "@/lib/time";
 
 // Proactive "heads up" messages: the app noticing things so you don't have to.
@@ -34,9 +37,9 @@ async function budgetPaceNudge(userId: string, timeZone: string): Promise<Nudge 
     getBudgetStatus(userId, timeZone),
     getAlertPrefs(userId),
   ]);
-  const budget = status.limit;
+  const budget = status.limitCents;
   if (budget <= 0) return null;
-  const spent = status.spent;
+  const spent = status.spentCents;
 
   // Month progress is measured in the user's own calendar, not the server's:
   // on the 1st in Auckland it is still the previous month in UTC (§50).
@@ -52,7 +55,7 @@ async function budgetPaceNudge(userId: string, timeZone: string): Promise<Nudge 
     return {
       id: "pace-over",
       tone: "warn",
-      title: `Over your budget by ${formatCurrency(subtractMoney(spent, budget))}`,
+      title: `Over your budget by ${formatCurrency(spent - budget)}`,
       body: `${formatCurrency(spent)} spent of ${formatCurrency(budget)} this month. Fixed bills aren't counted — this is the spending you control.`,
     };
   }
@@ -115,9 +118,9 @@ async function budgetPaceNudge(userId: string, timeZone: string): Promise<Nudge 
 // 2) Unusual big purchase: way above your usual size for that category.
 async function bigPurchaseNudge(userId: string): Promise<Nudge | null> {
   const recent = await prisma.transaction.findMany({
-    where: { userId, date: { gte: daysAgo(7) }, amount: { gt: 50 }, owedBack: false },
+    where: { userId, date: { gte: daysAgo(7) }, amountCents: { gt: 5000 }, owedBack: false },
     include: { category: { select: { name: true, group: true } } },
-    orderBy: { amount: "desc" },
+    orderBy: { amountCents: "desc" },
     take: 50,
   });
   for (const t of recent) {
@@ -127,18 +130,18 @@ async function bigPurchaseNudge(userId: string): Promise<Nudge | null> {
         userId,
         categoryId: t.categoryId,
         date: { gte: daysAgo(90), lt: daysAgo(7) },
-        amount: { gt: 0 },
+        amountCents: { gt: 0 },
       },
-      _avg: { amount: true },
+      _avg: { amountCents: true },
       _count: true,
     });
-    const avg = history._avg.amount ?? 0;
-    if (history._count >= 5 && avg > 0 && t.amount > avg * 3) {
+    const avg = history._avg.amountCents ?? 0;
+    if (history._count >= 5 && avg > 0 && t.amountCents > avg * 3) {
       return {
         id: `big-${t.id}`,
         tone: "info",
-        title: `What was the ${formatCurrency(t.amount)} at ${t.merchantName || t.name}?`,
-        body: `That's about ${Math.round(t.amount / avg)}× your usual ${t.category.name} purchase. If someone owes you for it, mark it "owed back" and it won't count against you.`,
+        title: `What was the ${formatCurrency(t.amountCents)} at ${t.merchantName || t.name}?`,
+        body: `That's about ${Math.round(t.amountCents / avg)}× your usual ${t.category.name} purchase. If someone owes you for it, mark it "owed back" and it won't count against you.`,
       };
     }
   }
@@ -159,15 +162,15 @@ async function dayPatternNudge(userId: string): Promise<Nudge | null> {
       userId,
       categoryId: cat.id,
       date: { gte: daysAgo(90), lt: daysAgo(7) },
-      amount: { gt: 0 },
+      amountCents: { gt: 0 },
     },
-    select: { date: true, amount: true },
+    select: { date: true, amountCents: true },
     take: 2000,
   });
   if (history.length < 10) return null;
 
   const share = new Array(7).fill(0);
-  for (const t of history) share[new Date(t.date).getDay()] += t.amount;
+  for (const t of history) share[new Date(t.date).getDay()] += t.amountCents;
   const total = share.reduce((s, x) => s + x, 0);
   if (total <= 0) return null;
 
@@ -177,9 +180,9 @@ async function dayPatternNudge(userId: string): Promise<Nudge | null> {
     .map((d) => DAY_NAMES[d.i]);
 
   const thisWeek = await prisma.transaction.findMany({
-    where: { userId, categoryId: cat.id, date: { gte: daysAgo(7) }, amount: { gt: 15 } },
-    select: { id: true, date: true, amount: true, name: true, merchantName: true },
-    orderBy: { amount: "desc" },
+    where: { userId, categoryId: cat.id, date: { gte: daysAgo(7) }, amountCents: { gt: 1500 } },
+    select: { id: true, date: true, amountCents: true, name: true, merchantName: true },
+    orderBy: { amountCents: "desc" },
     take: 50,
   });
   for (const t of thisWeek) {
@@ -189,7 +192,7 @@ async function dayPatternNudge(userId: string): Promise<Nudge | null> {
         id: `day-${t.id}`,
         tone: "info",
         title: `${DAY_NAMES[day]} takeout is new for you`,
-        body: `${formatCurrency(t.amount)} at ${t.merchantName || t.name} on a ${DAY_NAMES[day]} — you usually eat out on ${usualDays.join(" and ")}. It digs into that budget.`,
+        body: `${formatCurrency(t.amountCents)} at ${t.merchantName || t.name} on a ${DAY_NAMES[day]} — you usually eat out on ${usualDays.join(" and ")}. It digs into that budget.`,
       };
     }
   }
@@ -201,13 +204,13 @@ async function staleReimbursementNudge(userId: string): Promise<Nudge | null> {
   const { outstanding } = await getReimbursements(userId);
   const stale = outstanding.filter((i) => new Date(i.date) < daysAgo(14));
   if (!stale.length) return null;
-  const total = sumBy(stale, (i) => i.outstanding);
+  const total = sumCentsBy(stale, (i) => i.outstandingCents);
   const oldest = stale[stale.length - 1];
   return {
     id: "stale-reimb",
     tone: "info",
     title: `Still owed ${formatCurrency(total)}`,
-    body: `${oldest.name} from ${formatDateShort(oldest.date)} is still ${formatCurrency(oldest.outstanding)} outstanding. Might be time for a nudge.`,
+    body: `${oldest.name} from ${formatDateShort(oldest.date)} is still ${formatCurrency(oldest.outstandingCents)} outstanding. Might be time for a nudge.`,
   };
 }
 

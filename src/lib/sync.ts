@@ -13,6 +13,7 @@ import { getCategoryIdMap } from "@/lib/db-helpers";
 import { mapPlaidCategory } from "@/lib/categories";
 import { loadMerchantRules, resolveSmartCategory } from "@/lib/smart-categorize";
 import { sanitizeDisplayUrl } from "@/lib/security/url-guard";
+import { dollarsToCents } from "@/lib/money";
 import { log, metric } from "@/lib/security/logger";
 import { recordAudit } from "@/lib/security/audit";
 
@@ -56,8 +57,13 @@ async function syncAccounts(
       mask: account.mask ?? null,
       type: String(account.type),
       subtype: account.subtype ? String(account.subtype) : null,
-      currentBalance: account.balances.current ?? 0,
-      availableBalance: account.balances.available ?? null,
+      // Plaid sends dollars; converted to exact cents once, here, at the
+      // boundary. Nothing downstream sees a float (§49).
+      currentBalanceCents: dollarsToCents(account.balances.current ?? 0),
+      availableBalanceCents:
+        account.balances.available == null
+          ? null
+          : dollarsToCents(account.balances.available),
       currencyCode: account.balances.iso_currency_code ?? "USD",
     };
 
@@ -100,9 +106,11 @@ async function upsertTransaction(
   let categoryId = categoryMap[categoryName] ?? null;
 
   // The user's own learned rules outrank Plaid's guess.
+  const amountCents = dollarsToCents(transaction.amount);
+
   const smart = resolveSmartCategory(
     transaction.merchant_name || transaction.name,
-    transaction.amount,
+    amountCents,
     rules,
   );
   if (smart?.categoryId) categoryId = smart.categoryId;
@@ -121,7 +129,7 @@ async function upsertTransaction(
   );
 
   const shared = {
-    amount: transaction.amount,
+    amountCents,
     date: new Date(transaction.date),
     name: transaction.name,
     merchantName: transaction.merchant_name ?? null,

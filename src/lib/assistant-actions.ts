@@ -1,6 +1,10 @@
 import "server-only";
 import { prisma } from "@/lib/prisma";
-import { formatCurrency } from "@/lib/format";
+import { formatCurrency as formatDollars } from "@/lib/format";
+import { centsToDollars, sumCentsBy } from "@/lib/money";
+
+/** Action replies are user-facing text; cents become dollars at format time. */
+const formatCurrency = (cents: number) => formatDollars(centsToDollars(cents));
 import { getAlertPrefs, setAlertPrefs } from "@/lib/alert-prefs";
 import { CATEGORIES } from "@/lib/categories";
 import { learnFromCorrection } from "@/lib/smart-categorize";
@@ -82,34 +86,34 @@ export async function maybeAction(
       getSpendingByCategory(user.id, start, end),
       detectRecurring(user.id),
     ]);
-    const total = byCategory.reduce((s, c) => s + c.total, 0);
+    const total = sumCentsBy(byCategory, (c) => c.totalCents);
     const top = byCategory.slice(0, 5);
-    const recurringMonthly = recurring.reduce((s, r) => s + r.monthlyCost, 0);
+    const recurringMonthly = sumCentsBy(recurring, (r) => r.monthlyCostCents);
 
     // Biggest merchants this month.
     const txns = await prisma.transaction.findMany({
       where: {
         userId: user.id,
         date: { gte: start, lte: end },
-        amount: { gt: 0 },
+        amountCents: { gt: 0 },
         account: { isBusiness: false },
         category: { group: { not: "transfer" } },
       },
-      select: { merchantName: true, name: true, amount: true },
+      select: { merchantName: true, name: true, amountCents: true },
     });
     const byMerchant = new Map<string, number>();
     for (const t of txns) {
       const m = t.merchantName || t.name;
-      byMerchant.set(m, (byMerchant.get(m) ?? 0) + t.amount);
+      byMerchant.set(m, (byMerchant.get(m) ?? 0) + t.amountCents);
     }
     const topMerchants = [...byMerchant.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
 
-    const kept = cashflow.income - cashflow.spending;
+    const kept = cashflow.incomeCents - cashflow.spendingCents;
     return {
       answer:
-        `This month: ${formatCurrency(cashflow.income)} came in, ${formatCurrency(cashflow.spending)} went out — you kept ${formatCurrency(kept)}. ` +
+        `This month: ${formatCurrency(cashflow.incomeCents)} came in, ${formatCurrency(cashflow.spendingCents)} went out — you kept ${formatCurrency(kept)}. ` +
         (total > 0 && top.length > 0
-          ? `Most of it went to ${top[0].name} (${formatCurrency(top[0].total)}, ${Math.round((top[0].total / total) * 100)}% of spending). `
+          ? `Most of it went to ${top[0].name} (${formatCurrency(top[0].totalCents)}, ${Math.round((top[0].totalCents / total) * 100)}% of spending). `
           : "") +
         (recurringMonthly > 0
           ? `Subscriptions and bills quietly take ${formatCurrency(recurringMonthly)}/mo — the Recurring tab in Insights lists them all.`
@@ -117,7 +121,7 @@ export async function maybeAction(
       detail: [
         ...top.map((c) => ({
           label: c.name,
-          value: `${formatCurrency(c.total)}${total > 0 ? ` · ${Math.round((c.total / total) * 100)}%` : ""}`,
+          value: `${formatCurrency(c.totalCents)}${total > 0 ? ` · ${Math.round((c.totalCents / total) * 100)}%` : ""}`,
         })),
         ...topMerchants.map(([m, v], i) => ({
           label: `Top merchant ${i + 1}: ${m}`,
@@ -152,7 +156,7 @@ export async function maybeAction(
         const recent = await prisma.transaction.findMany({
           where: {
             userId: user.id, date: { gte: since } },
-          select: { id: true, name: true, merchantName: true, categoryId: true, amount: true },
+          select: { id: true, name: true, merchantName: true, categoryId: true, amountCents: true },
           orderBy: { date: "desc" },
           take: 600,
         });
@@ -238,7 +242,7 @@ export async function maybeAction(
     const txn = await prisma.transaction.findFirst({
       where: {
         userId: user.id,
-        amount: { gt: 0 },
+        amountCents: { gt: 0 },
         ...(merchantQuery
           ? {
               OR: [
@@ -269,7 +273,7 @@ export async function maybeAction(
     });
     const when = txn.date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
     return {
-      answer: `Saved it: ${txn.merchantName || txn.name} — ${formatCurrency(txn.amount)} on ${when} (${txn.account.name}) is now in the “${folder.name}” folder. Find it any time on the Folders screen.`,
+      answer: `Saved it: ${txn.merchantName || txn.name} — ${formatCurrency(txn.amountCents)} on ${when} (${txn.account.name}) is now in the “${folder.name}” folder. Find it any time on the Folders screen.`,
     };
   }
 

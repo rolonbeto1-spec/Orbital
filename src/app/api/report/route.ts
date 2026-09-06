@@ -7,7 +7,7 @@ import { detectRecurring } from "@/lib/recurring";
 import { WANTS_CATEGORIES } from "@/lib/buckets";
 import { getBudgetCategoryNames } from "@/lib/budget";
 import { monthKey } from "@/lib/validation";
-import { sumBy, subtractMoney, roundMoney } from "@/lib/money";
+import { sumCentsBy, serializeMoneyFields } from "@/lib/money";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -50,7 +50,7 @@ export const GET = route({ auth: "user", limits: ["report"], query }, async (ctx
     getSpendingByCategory(userId, pStart, pEnd),
     prisma.budget.findMany({
       where: { userId },
-      select: { amount: true, category: { select: { name: true } } },
+      select: { amountCents: true, category: { select: { name: true } } },
     }),
     detectRecurring(userId),
     prisma.property.findMany({ where: { userId } }),
@@ -58,68 +58,79 @@ export const GET = route({ auth: "user", limits: ["report"], query }, async (ctx
       where: {
         userId,
         date: { gte: start, lt: end },
-        amount: { gt: 0 },
+        amountCents: { gt: 0 },
         account: { isBusiness: false },
       },
       select: {
-        name: true, merchantName: true, amount: true, date: true,
+        name: true, merchantName: true, amountCents: true, date: true,
         category: { select: { name: true, group: true } },
       },
       take: 5000,
     }),
   ]);
 
-  const prevMap = new Map(prevCats.map((c) => [c.name, c.total]));
+  const prevMap = new Map(prevCats.map((c) => [c.name, c.totalCents]));
   const categories = cats.map((c) => {
-    const prevTotal = prevMap.get(c.name) ?? 0;
+    const prevTotalCents = prevMap.get(c.name) ?? 0;
     return {
       name: c.name,
       icon: c.icon,
       color: c.color,
-      total: c.total,
-      prevTotal,
-      deltaPct: prevTotal > 0 ? Math.round(((c.total - prevTotal) / prevTotal) * 100) : null,
+      totalCents: c.totalCents,
+      prevTotalCents,
+      deltaPct:
+        prevTotalCents > 0
+          ? Math.round(((c.totalCents - prevTotalCents) / prevTotalCents) * 100)
+          : null,
       isWant: WANTS_CATEGORIES.includes(c.name),
     };
   });
-  const wantsTotal = sumBy(categories.filter((c) => c.isWant), (c) => c.total);
-  const needsTotal = sumBy(categories.filter((c) => !c.isWant), (c) => c.total);
+  const wantsTotal = sumCentsBy(categories.filter((c) => c.isWant), (c) => c.totalCents);
+  const needsTotal = sumCentsBy(categories.filter((c) => !c.isWant), (c) => c.totalCents);
 
   // Top merchants and single biggest purchase (expenses only).
   const byMerchant = new Map<string, { total: number; count: number }>();
-  let biggest: { name: string; amount: number; date: Date; category: string | null } | null = null;
+  let biggest:
+    | { name: string; amountCents: number; date: Date; category: string | null }
+    | null = null;
   for (const t of txns) {
     if (t.category && t.category.group !== "expense") continue;
     const name = t.merchantName || t.name;
     const m = byMerchant.get(name) ?? { total: 0, count: 0 };
-    m.total += t.amount;
+    m.total += t.amountCents;
     m.count++;
     byMerchant.set(name, m);
-    if (!biggest || t.amount > biggest.amount) {
-      biggest = { name, amount: t.amount, date: t.date, category: t.category?.name ?? null };
+    if (!biggest || t.amountCents > biggest.amountCents) {
+      biggest = {
+        name,
+        amountCents: t.amountCents,
+        date: t.date,
+        category: t.category?.name ?? null,
+      };
     }
   }
   const topMerchants = Array.from(byMerchant.entries())
-    .map(([name, v]) => ({ name, total: roundMoney(v.total), count: v.count }))
-    .sort((a, b) => b.total - a.total)
+    .map(([name, v]) => ({ name, totalCents: v.total, count: v.count }))
+    .sort((a, b) => b.totalCents - a.totalCents)
     .slice(0, 5);
 
   // Budget block honors the user's customized in-budget category set.
   const budgetNames = await getBudgetCategoryNames(userId);
-  const wantsBudgetTotal = sumBy(
+  const wantsBudgetTotal = sumCentsBy(
     budgets.filter((b) => budgetNames.includes(b.category.name)),
-    (b) => b.amount,
+    (b) => b.amountCents,
   );
-  const budgetSpent = sumBy(
+  const budgetSpent = sumCentsBy(
     categories.filter((c) => budgetNames.includes(c.name)),
-    (c) => c.total,
+    (c) => c.totalCents,
   );
 
-  const rentalsNet = sumBy(properties, (p) =>
-    subtractMoney(p.rentIncome, p.mortgage + p.utilities + p.hoa),
+  const rentalsNet = sumCentsBy(
+    properties,
+    (p) => p.rentIncomeCents - p.mortgageCents - p.utilitiesCents - p.hoaCents,
   );
 
-  const net = subtractMoney(flow.income, flow.spending);
+  const netCents = flow.incomeCents - flow.spendingCents;
   return safeJson({
     month: `${year}-${String(month0 + 1).padStart(2, "0")}`,
     label: new Date(Date.UTC(year, month0, 1)).toLocaleDateString("en-US", {
@@ -128,22 +139,30 @@ export const GET = route({ auth: "user", limits: ["report"], query }, async (ctx
       timeZone: "UTC",
     }),
     partial,
-    income: flow.income,
-    spending: flow.spending,
-    net,
-    savingsRate: flow.income > 0 ? Math.round((net / flow.income) * 100) : null,
+    income: flow.incomeCents / 100,
+    spending: flow.spendingCents / 100,
+    net: netCents / 100,
+    savingsRate:
+      flow.incomeCents > 0 ? Math.round((netCents / flow.incomeCents) * 100) : null,
     prev: {
       label: new Date(Date.UTC(prevYear, prevMonth - 1, 1)).toLocaleDateString("en-US", { month: "long", timeZone: "UTC" }),
-      income: prevFlow.income,
-      spending: prevFlow.spending,
+      income: prevFlow.incomeCents / 100,
+      spending: prevFlow.spendingCents / 100,
     },
-    categories,
-    needsTotal,
-    wantsTotal,
-    topMerchants,
-    biggest,
-    wantsBudget: wantsBudgetTotal > 0 ? { budget: wantsBudgetTotal, spent: budgetSpent } : null,
-    recurringMonthly: roundMoney(sumBy(recurring, (r) => r.monthlyCost)),
-    rentals: properties.length > 0 ? { net: rentalsNet, count: properties.length } : null,
+    // Everything below is converted from exact cents at this single boundary.
+    categories: categories.map((c) => serializeMoneyFields(c)),
+    needsTotal: needsTotal / 100,
+    wantsTotal: wantsTotal / 100,
+    topMerchants: topMerchants.map((m) => serializeMoneyFields(m)),
+    biggest: biggest ? serializeMoneyFields(biggest) : null,
+    wantsBudget:
+      wantsBudgetTotal > 0
+        ? { budget: wantsBudgetTotal / 100, spent: budgetSpent / 100 }
+        : null,
+    recurringMonthly: sumCentsBy(recurring, (r) => r.monthlyCostCents) / 100,
+    rentals:
+      properties.length > 0
+        ? { net: rentalsNet / 100, count: properties.length }
+        : null,
   });
 });

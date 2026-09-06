@@ -1,7 +1,7 @@
 import "server-only";
 import { prisma } from "@/lib/prisma";
 import type { MerchantRule } from "@/generated/prisma";
-import { roundMoney } from "@/lib/money";
+import { medianCents, asCents } from "@/lib/money";
 
 /**
  * Merchant categorisation memory — now per user (§2, §6).
@@ -22,8 +22,8 @@ const GAS_STATIONS = [
   "marathon", "phillips 66", "circle k", "quiktrip", "casey's", "wawa", "76 ",
 ];
 
-/** Below this, a gas-station charge is treated as snacks, not fuel. */
-export const GAS_SNACK_THRESHOLD = 15;
+/** Below this, a gas-station charge is treated as snacks, not fuel. In cents. */
+export const GAS_SNACK_THRESHOLD_CENTS = 1500;
 
 export function isGasStation(merchant: string): boolean {
   const lower = merchant.toLowerCase();
@@ -44,7 +44,7 @@ export async function loadMerchantRules(userId: string): Promise<MerchantRule[]>
  */
 export function resolveSmartCategory(
   merchant: string,
-  amount: number,
+  amountCents: number,
   rules: MerchantRule[],
 ): { categoryId?: string; categoryName?: string } | null {
   const key = merchant.toLowerCase();
@@ -53,17 +53,20 @@ export function resolveSmartCategory(
   const matches = rules.filter((rule) => key.includes(rule.match));
   const bounded = matches.find(
     (rule) =>
-      (rule.minAmount != null || rule.maxAmount != null) &&
-      (rule.minAmount == null || amount >= rule.minAmount) &&
-      (rule.maxAmount == null || amount <= rule.maxAmount),
+      (rule.minAmountCents != null || rule.maxAmountCents != null) &&
+      (rule.minAmountCents == null || amountCents >= rule.minAmountCents) &&
+      (rule.maxAmountCents == null || amountCents <= rule.maxAmountCents),
   );
-  const unbounded = matches.find((rule) => rule.minAmount == null && rule.maxAmount == null);
+  const unbounded = matches.find(
+    (rule) => rule.minAmountCents == null && rule.maxAmountCents == null,
+  );
   const rule = bounded ?? unbounded;
   if (rule) return { categoryId: rule.categoryId };
 
-  if (isGasStation(key) && amount > 0) {
+  if (isGasStation(key) && amountCents > 0) {
     return {
-      categoryName: amount < GAS_SNACK_THRESHOLD ? "Food & Dining" : "Transportation",
+      categoryName:
+        amountCents < GAS_SNACK_THRESHOLD_CENTS ? "Food & Dining" : "Transportation",
     };
   }
   return null;
@@ -81,19 +84,19 @@ export async function learnFromCorrection(
   userId: string,
   merchant: string,
   categoryId: string,
-  amount?: number,
+  amountCents?: number,
 ): Promise<void> {
   const match = merchant.toLowerCase().trim().slice(0, 120);
   if (!match) return;
 
-  if (amount != null && amount > 0) {
+  if (amountCents != null && amountCents > 0) {
     // A correction landing inside an already-learned band retargets it.
     const rules = await prisma.merchantRule.findMany({ where: { userId, match } });
     const band = rules.find(
       (rule) =>
-        (rule.minAmount != null || rule.maxAmount != null) &&
-        (rule.minAmount == null || amount >= rule.minAmount) &&
-        (rule.maxAmount == null || amount <= rule.maxAmount),
+        (rule.minAmountCents != null || rule.maxAmountCents != null) &&
+        (rule.minAmountCents == null || amountCents >= rule.minAmountCents) &&
+        (rule.maxAmountCents == null || amountCents <= rule.maxAmountCents),
     );
     if (band) {
       await prisma.merchantRule.update({
@@ -103,9 +106,9 @@ export async function learnFromCorrection(
       return;
     }
 
-    const split = await findAmountSplit(userId, match, categoryId, amount);
+    const split = await findAmountSplit(userId, match, categoryId, amountCents);
     if (split) {
-      const low = amount < split.otherTypical;
+      const low = amountCents < split.otherTypicalCents;
       // Replace this merchant's rules with a two-band pair, atomically, so a
       // concurrent sync cannot observe the merchant with no rule at all.
       await prisma.$transaction([
@@ -117,16 +120,16 @@ export async function learnFromCorrection(
               match,
               categoryId,
               source: "learned",
-              minAmount: low ? null : split.cutoff,
-              maxAmount: low ? split.cutoff : null,
+              minAmountCents: low ? null : split.cutoffCents,
+              maxAmountCents: low ? split.cutoffCents : null,
             },
             {
               userId,
               match,
               categoryId: split.otherCategoryId,
               source: "learned",
-              minAmount: low ? split.cutoff : null,
-              maxAmount: low ? null : split.cutoff,
+              minAmountCents: low ? split.cutoffCents : null,
+              maxAmountCents: low ? null : split.cutoffCents,
             },
           ],
         }),
@@ -142,7 +145,7 @@ export async function learnFromCorrection(
   // rule is found explicitly and then written. The create is guarded against
   // a concurrent insert by the same unique constraint (§48).
   const existing = await prisma.merchantRule.findFirst({
-    where: { userId, match, minAmount: null, maxAmount: null },
+    where: { userId, match, minAmountCents: null, maxAmountCents: null },
     select: { id: true },
   });
   if (existing) {
@@ -157,7 +160,7 @@ export async function learnFromCorrection(
     .catch(async () => {
       // Lost a race: another request created it first. Apply our value.
       await prisma.merchantRule.updateMany({
-        where: { userId, match, minAmount: null, maxAmount: null },
+        where: { userId, match, minAmountCents: null, maxAmountCents: null },
         data: { categoryId, source: "learned" },
       });
     });
@@ -176,7 +179,7 @@ export async function rememberAiCategory(
   if (!match) return;
 
   const existing = await prisma.merchantRule.findFirst({
-    where: { userId, match, minAmount: null, maxAmount: null },
+    where: { userId, match, minAmountCents: null, maxAmountCents: null },
     select: { id: true, source: true },
   });
 
@@ -203,16 +206,16 @@ async function findAmountSplit(
   userId: string,
   match: string,
   categoryId: string,
-  amount: number,
-): Promise<{ cutoff: number; otherCategoryId: string; otherTypical: number } | null> {
+  amountCents: number,
+): Promise<{ cutoffCents: number; otherCategoryId: string; otherTypicalCents: number } | null> {
   const peers = await prisma.transaction.findMany({
     where: {
       userId, // scoped: never learns from another person's spending
       OR: [{ merchantName: { contains: match } }, { name: { contains: match } }],
       categoryId: { not: null },
-      amount: { gt: 0 },
+      amountCents: { gt: 0 },
     },
-    select: { amount: true, categoryId: true },
+    select: { amountCents: true, categoryId: true },
     take: 200,
   });
 
@@ -220,25 +223,26 @@ async function findAmountSplit(
   for (const peer of peers) {
     if (!peer.categoryId || peer.categoryId === categoryId) continue;
     const amounts = byCategory.get(peer.categoryId) ?? [];
-    amounts.push(peer.amount);
+    amounts.push(peer.amountCents);
     byCategory.set(peer.categoryId, amounts);
   }
 
-  let best: { otherCategoryId: string; otherTypical: number; count: number } | null = null;
+  let best: { otherCategoryId: string; otherTypicalCents: number; count: number } | null = null;
   for (const [category, amounts] of byCategory) {
-    const sorted = [...amounts].sort((a, b) => a - b);
-    const typical = sorted[Math.floor(sorted.length / 2)];
-    // "Clearly apart": at least $10 and 60% of the larger amount.
-    const gap = Math.abs(amount - typical);
-    if (gap < 10 || gap < Math.max(amount, typical) * 0.6) continue;
+    const typicalCents = medianCents(amounts);
+    // "Clearly apart": at least $10 (1000 cents) and 60% of the larger amount.
+    const gap = Math.abs(amountCents - typicalCents);
+    if (gap < 1000 || gap < Math.max(amountCents, typicalCents) * 0.6) continue;
     if (!best || amounts.length > best.count) {
-      best = { otherCategoryId: category, otherTypical: typical, count: amounts.length };
+      best = { otherCategoryId: category, otherTypicalCents: typicalCents, count: amounts.length };
     }
   }
   if (!best) return null;
+  // The cutoff sits halfway between the two typical amounts, rounded to an
+  // exact cent so the stored band boundary is itself exact.
   return {
-    cutoff: roundMoney((amount + best.otherTypical) / 2),
+    cutoffCents: Math.round((amountCents + best.otherTypicalCents) / 2),
     otherCategoryId: best.otherCategoryId,
-    otherTypical: best.otherTypical,
+    otherTypicalCents: best.otherTypicalCents,
   };
 }

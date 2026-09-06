@@ -1,6 +1,7 @@
 import { route, safeJson } from "@/lib/security/api";
 import { prisma } from "@/lib/prisma";
 import { recordAudit } from "@/lib/security/audit";
+import { serializeMoneyFields } from "@/lib/money";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -82,7 +83,7 @@ export const GET = route(
         where: { userId },
         select: {
           name: true, officialName: true, mask: true, type: true, subtype: true,
-          currentBalance: true, availableBalance: true, isBusiness: true,
+          currentBalanceCents: true, availableBalanceCents: true, isBusiness: true,
           currencyCode: true, createdAt: true,
           item: { select: { institutionName: true } },
         },
@@ -92,9 +93,9 @@ export const GET = route(
       prisma.transaction.findMany({
         where: { userId },
         select: {
-          date: true, name: true, merchantName: true, amount: true,
+          date: true, name: true, merchantName: true, amountCents: true,
           currencyCode: true, pending: true, notes: true,
-          owedBack: true, reimbursedAmount: true,
+          owedBack: true, reimbursedAmountCents: true,
           category: { select: { name: true } },
           folder: { select: { name: true } },
           account: { select: { name: true, mask: true } },
@@ -107,7 +108,7 @@ export const GET = route(
       prisma.holding.findMany({
         where: { userId },
         select: {
-          symbol: true, name: true, quantity: true, price: true, value: true,
+          symbol: true, name: true, quantity: true, priceUsd: true, valueCents: true,
           kind: true, updatedAt: true,
           account: { select: { name: true } },
         },
@@ -122,7 +123,8 @@ export const GET = route(
       prisma.merchantRule.findMany({
         where: { userId },
         select: {
-          match: true, minAmount: true, maxAmount: true, source: true, createdAt: true,
+          match: true, minAmountCents: true, maxAmountCents: true, source: true,
+          createdAt: true,
           category: { select: { name: true } },
         },
         take: MAX_ROWS,
@@ -130,13 +132,13 @@ export const GET = route(
 
       prisma.budget.findMany({
         where: { userId },
-        select: { amount: true, createdAt: true, category: { select: { name: true } } },
+        select: { amountCents: true, createdAt: true, category: { select: { name: true } } },
       }),
 
       prisma.goal.findMany({
         where: { userId },
         select: {
-          name: true, targetAmount: true, currentAmount: true, targetDate: true,
+          name: true, targetAmountCents: true, currentAmountCents: true, targetDate: true,
           createdAt: true,
         },
       }),
@@ -144,8 +146,9 @@ export const GET = route(
       prisma.property.findMany({
         where: { userId },
         select: {
-          name: true, rentIncome: true, mortgage: true, utilities: true, hoa: true,
-          sweatIn: true, sweatOut: true, notes: true, createdAt: true,
+          name: true, rentIncomeCents: true, mortgageCents: true, utilitiesCents: true,
+          hoaCents: true, sweatInCents: true, sweatOutCents: true, notes: true,
+          createdAt: true,
         },
       }),
 
@@ -173,15 +176,17 @@ export const GET = route(
         "Bank access credentials, password hashes and session tokens are " +
         "deliberately not included; they are secrets, not your data.",
       account: user,
+      // Money is exported in dollars, converted once here — an export is a
+      // human-readable artefact, and "84.21" is what a person expects to see.
       connections: items,
-      accounts,
-      transactions,
-      holdings,
+      accounts: accounts.map((a) => serializeMoneyFields(a)),
+      transactions: transactions.map((t) => serializeMoneyFields(t)),
+      holdings: holdings.map((h) => serializeMoneyFields(h)),
       categories,
-      merchantRules,
-      budgets,
-      goals,
-      properties,
+      merchantRules: merchantRules.map((r) => serializeMoneyFields(r)),
+      budgets: budgets.map((b) => serializeMoneyFields(b)),
+      goals: goals.map((g) => serializeMoneyFields(g)),
+      properties: properties.map((p) => serializeMoneyFields(p)),
       folders,
       settings,
       counts: {

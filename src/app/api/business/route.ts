@@ -1,7 +1,7 @@
 import { route, safeJson } from "@/lib/security/api";
 import { prisma } from "@/lib/prisma";
 import { monthRangeInZone, partsInZone } from "@/lib/time";
-import { sumBy, subtractMoney, roundMoney } from "@/lib/money";
+import { sumCentsBy, serializeMoneyFields } from "@/lib/money";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,7 +20,7 @@ export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
   const accounts = await prisma.account.findMany({
     where: { userId, isBusiness: true },
     select: {
-      id: true, name: true, mask: true, currentBalance: true,
+      id: true, name: true, mask: true, currentBalanceCents: true,
       item: { select: { institutionName: true } },
     },
   });
@@ -39,7 +39,7 @@ export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
   const txns = await prisma.transaction.findMany({
     where: { userId, accountId: { in: ids }, date: { gte: sixMonthsAgo } },
     select: {
-      id: true, date: true, name: true, merchantName: true, amount: true,
+      id: true, date: true, name: true, merchantName: true, amountCents: true,
       category: { select: { name: true, icon: true, color: true, group: true } },
     },
     orderBy: { date: "desc" },
@@ -47,17 +47,26 @@ export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
   });
 
   // Monthly earnings / expenses / net for the last 6 months.
-  const months: { month: string; label: string; income: number; expenses: number; net: number }[] = [];
+  const months: {
+    month: string;
+    label: string;
+    incomeCents: number;
+    expensesCents: number;
+    netCents: number;
+  }[] = [];
   for (let i = 5; i >= 0; i--) {
     let mYear = year;
     let mMonth = month - i;
     while (mMonth <= 0) { mMonth += 12; mYear -= 1; }
     const { start, end } = monthRangeInZone(timezone, mYear, mMonth);
     const inMonth = txns.filter((t) => t.date >= start && t.date < end);
-    const income = sumBy(inMonth.filter((t) => t.amount < 0), (t) => -t.amount);
-    const expenses = sumBy(
-      inMonth.filter((t) => t.amount > 0 && t.category?.group !== "transfer"),
-      (t) => t.amount,
+    const income = sumCentsBy(
+      inMonth.filter((t) => t.amountCents < 0),
+      (t) => -t.amountCents,
+    );
+    const expenses = sumCentsBy(
+      inMonth.filter((t) => t.amountCents > 0 && t.category?.group !== "transfer"),
+      (t) => t.amountCents,
     );
     months.push({
       month: `${mYear}-${String(mMonth).padStart(2, "0")}`,
@@ -65,27 +74,27 @@ export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
         month: "short",
         timeZone: "UTC",
       }),
-      income,
-      expenses,
-      net: subtractMoney(income, expenses),
+      incomeCents: income,
+      expensesCents: expenses,
+      netCents: income - expenses,
     });
   }
   const current = months[months.length - 1];
 
   // Top expense merchants this month + overall expense categories.
   const { start: mStart } = monthRangeInZone(timezone, year, month);
-  const monthExpenses = txns.filter((t) => t.date >= mStart && t.amount > 0);
+  const monthExpenses = txns.filter((t) => t.date >= mStart && t.amountCents > 0);
   const byMerchant = new Map<string, { total: number; count: number }>();
   for (const t of monthExpenses) {
     const name = t.merchantName || t.name;
     const m = byMerchant.get(name) ?? { total: 0, count: 0 };
-    m.total += t.amount;
+    m.total += t.amountCents;
     m.count++;
     byMerchant.set(name, m);
   }
   const topExpenses = Array.from(byMerchant.entries())
-    .map(([name, v]) => ({ name, total: roundMoney(v.total), count: v.count }))
-    .sort((a, b) => b.total - a.total)
+    .map(([name, v]) => ({ name, totalCents: v.total, count: v.count }))
+    .sort((a, b) => b.totalCents - a.totalCents)
     .slice(0, 5);
 
   return safeJson({
@@ -95,16 +104,16 @@ export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
       name: a.name,
       mask: a.mask,
       bank: a.item.institutionName,
-      balance: a.currentBalance,
+      balance: a.currentBalanceCents / 100,
     })),
-    thisMonth: current,
-    months,
-    topExpenses,
+    thisMonth: current ? serializeMoneyFields(current) : null,
+    months: months.map((m) => serializeMoneyFields(m)),
+    topExpenses: topExpenses.map((e) => serializeMoneyFields(e)),
     recent: txns.slice(0, 8).map((t) => ({
       id: t.id,
       date: t.date,
       name: t.merchantName || t.name,
-      amount: t.amount,
+      amount: t.amountCents / 100,
       category: t.category?.name ?? null,
       icon: t.category?.icon ?? null,
       color: t.category?.color ?? null,

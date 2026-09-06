@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { WANTS_CATEGORIES } from "@/lib/buckets";
 import { getSpendingByCategory } from "@/lib/queries";
 import { currentMonthRange } from "@/lib/time";
-import { sumBy, subtractMoney } from "@/lib/money";
+import { sumCentsBy } from "@/lib/money";
 
 /**
  * The budget, per user.
@@ -24,14 +24,14 @@ export interface BudgetCategory {
   name: string;
   icon: string;
   color: string;
-  limit: number;
-  spent: number;
+  limitCents: number;
+  spentCents: number;
 }
 
 export interface BudgetStatus {
-  limit: number;
-  spent: number;
-  left: number;
+  limitCents: number;
+  spentCents: number;
+  leftCents: number;
   hasBudget: boolean;
   categories: BudgetCategory[];
 }
@@ -50,13 +50,13 @@ export async function getBudgetStatus(
     }),
     prisma.budget.findMany({
       where: { userId },
-      select: { categoryId: true, amount: true },
+      select: { categoryId: true, amountCents: true },
     }),
     getSpendingByCategory(userId, start, end),
   ]);
 
-  const limitByCategory = new Map(budgets.map((b) => [b.categoryId, b.amount]));
-  const spentByCategory = new Map(spend.map((s) => [s.categoryId, s.total]));
+  const limitByCategory = new Map(budgets.map((b) => [b.categoryId, b.amountCents]));
+  const spentByCategory = new Map(spend.map((s) => [s.categoryId, s.totalCents]));
 
   const items: BudgetCategory[] = categories
     .filter((category) => category.group === "expense" && categoryInBudget(category))
@@ -65,20 +65,20 @@ export async function getBudgetStatus(
       name: category.name,
       icon: category.icon,
       color: category.color,
-      limit: limitByCategory.get(category.id) ?? 0,
-      spent: spentByCategory.get(category.id) ?? 0,
+      limitCents: limitByCategory.get(category.id) ?? 0,
+      spentCents: spentByCategory.get(category.id) ?? 0,
     }))
-    .filter((item) => item.limit > 0 || item.spent > 0)
-    .sort((a, b) => b.spent - a.spent);
+    .filter((item) => item.limitCents > 0 || item.spentCents > 0)
+    .sort((a, b) => b.spentCents - a.spentCents);
 
-  const limit = sumBy(items, (item) => item.limit);
-  const spent = sumBy(items, (item) => item.spent);
+  const limitCents = sumCentsBy(items, (item) => item.limitCents);
+  const spentCents = sumCentsBy(items, (item) => item.spentCents);
 
   return {
-    limit,
-    spent,
-    left: subtractMoney(limit, spent),
-    hasBudget: limit > 0,
+    limitCents,
+    spentCents,
+    leftCents: limitCents - spentCents,
+    hasBudget: limitCents > 0,
     categories: items,
   };
 }

@@ -125,8 +125,9 @@ export async function createTenant(label: string, options?: { role?: "USER" | "A
       mask: "1234",
       type: "depository",
       subtype: "checking",
-      currentBalance: 2500,
-      availableBalance: 2500,
+      // $2,500.00 — exact cents.
+      currentBalanceCents: 250_000,
+      availableBalanceCents: 250_000,
     },
   });
 
@@ -138,18 +139,25 @@ export async function createTenant(label: string, options?: { role?: "USER" | "A
       // Same merchant for both tenants: a leak would look like normal data.
       name: "WHOLE FOODS MARKET",
       merchantName: "Whole Foods",
-      amount: 84.21,
+      // $84.21 — chosen because 84.21 is NOT exactly representable as a
+      // binary float, so a regression to Float storage shows up immediately.
+      amountCents: 8421,
       date: new Date(),
       categoryId: category.id,
     },
   });
 
   const budget = await prisma.budget.create({
-    data: { userId: id, categoryId: category.id, amount: 600 },
+    data: { userId: id, categoryId: category.id, amountCents: 60_000 },
   });
 
   const goal = await prisma.goal.create({
-    data: { userId: id, name: "Emergency Fund", targetAmount: 10000, currentAmount: 2500 },
+    data: {
+      userId: id,
+      name: "Emergency Fund",
+      targetAmountCents: 1_000_000,
+      currentAmountCents: 250_000,
+    },
   });
 
   // Same folder name for both tenants — impossible under the old global
@@ -159,7 +167,12 @@ export async function createTenant(label: string, options?: { role?: "USER" | "A
   });
 
   const property = await prisma.property.create({
-    data: { userId: id, name: "Elm St duplex", rentIncome: 2200, mortgage: 1400 },
+    data: {
+      userId: id,
+      name: "Elm St duplex",
+      rentIncomeCents: 220_000,
+      mortgageCents: 140_000,
+    },
   });
 
   const holding = await prisma.holding.create({
@@ -169,8 +182,8 @@ export async function createTenant(label: string, options?: { role?: "USER" | "A
       symbol: "VOO",
       name: "Vanguard S&P 500",
       quantity: 10,
-      price: 500,
-      value: 5000,
+      priceUsd: 500,
+      valueCents: 500_000,
     },
   });
 

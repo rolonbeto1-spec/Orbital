@@ -3,7 +3,12 @@
 import { useEffect, useRef, useState } from "react";
 import { PiggyBank, Wallet } from "lucide-react";
 import { getIcon } from "@/lib/icons";
-import type { HiveBranch, HiveItem, BudgetStatus, HiveMoney } from "@/lib/hive";
+import type {
+  HiveBranchWire as HiveBranch,
+  HiveItemWire as HiveItem,
+  BudgetStatusWire as BudgetStatus,
+  HiveMoneyWire as HiveMoney,
+} from "@/lib/types";
 
 export interface HiveData {
   windowLabel: string;

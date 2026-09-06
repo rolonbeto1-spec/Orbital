@@ -11,7 +11,7 @@ import { currentMonthRange, monthRangeInZone, partsInZone } from "@/lib/time";
 import { NEEDS_CATEGORIES, WANTS_CATEGORIES } from "@/lib/buckets";
 import { categoryInBudget } from "@/lib/budget";
 import { detectRecurring } from "@/lib/recurring";
-import { roundMoney, subtractMoney } from "@/lib/money";
+import { centsToDollars } from "@/lib/money";
 import type { AssistantAnswer } from "@/lib/assistant";
 import type { AuthedUser } from "@/lib/security/session";
 import { askClaude, claimAiCall, untrusted, untrustedBlock } from "@/lib/ai/guard";
@@ -91,25 +91,27 @@ async function buildContext(user: AuthedUser): Promise<string> {
     prisma.account.findMany({
       where: { userId: user.id },
       select: {
-        name: true, type: true, subtype: true, currentBalance: true,
+        name: true, type: true, subtype: true, currentBalanceCents: true,
         item: { select: { institutionName: true } },
       },
     }),
     prisma.goal.findMany({
       where: { userId: user.id },
-      select: { name: true, targetAmount: true, currentAmount: true, targetDate: true },
+      select: {
+        name: true, targetAmountCents: true, currentAmountCents: true, targetDate: true,
+      },
     }),
     prisma.property.findMany({
       where: { userId: user.id },
       select: {
-        name: true, rentIncome: true, mortgage: true, utilities: true,
-        hoa: true, sweatIn: true, sweatOut: true,
+        name: true, rentIncomeCents: true, mortgageCents: true, utilitiesCents: true,
+        hoaCents: true, sweatInCents: true, sweatOutCents: true,
       },
     }),
     prisma.transaction.findMany({
       where: { userId: user.id, date: { gte: recentStart } },
       select: {
-        date: true, name: true, merchantName: true, amount: true, owedBack: true,
+        date: true, name: true, merchantName: true, amountCents: true, owedBack: true,
         category: { select: { name: true } },
       },
       orderBy: { date: "desc" },
@@ -118,7 +120,7 @@ async function buildContext(user: AuthedUser): Promise<string> {
     prisma.holding.findMany({
       where: { userId: user.id },
       select: {
-        symbol: true, name: true, kind: true, quantity: true, value: true,
+        symbol: true, name: true, kind: true, quantity: true, valueCents: true,
         account: { select: { name: true } },
       },
       take: 200,
@@ -126,7 +128,10 @@ async function buildContext(user: AuthedUser): Promise<string> {
     detectRecurring(user.id),
   ]);
 
-  const d = (value: number) => roundMoney(value);
+  // The model is given dollars, because a language model reasons about
+  // "$84.21" far better than "8421 cents". This is the same display
+  // conversion the HTTP boundary performs; no arithmetic happens after it.
+  const d = (cents: number) => centsToDollars(cents);
   const day = (date: Date) => date.toISOString().slice(0, 10);
   // Merchant and account names come from banks and from the user; they are
   // the injection surface, so every one is scrubbed and bounded.
@@ -136,26 +141,26 @@ async function buildContext(user: AuthedUser): Promise<string> {
     today: day(now),
     timezone: timeZone,
     net_worth: {
-      assets: d(netWorth.assets),
-      debt: d(netWorth.liabilities),
-      net: d(netWorth.netWorth),
-      cash: d(netWorth.cash),
-      credit_card_debt_not_yet_paid: d(netWorth.cardDebt),
-      truly_available: d(netWorth.trueAvailable),
+      assets: d(netWorth.assetsCents),
+      debt: d(netWorth.liabilitiesCents),
+      net: d(netWorth.netWorthCents),
+      cash: d(netWorth.cashCents),
+      credit_card_debt_not_yet_paid: d(netWorth.cardDebtCents),
+      truly_available: d(netWorth.trueAvailableCents),
     },
     this_month: {
-      income: d(cashflow.income),
-      spending: d(cashflow.spending),
-      spending_by_category: spendNow.map((c) => ({ category: c.name, spent: d(c.total) })),
+      income: d(cashflow.incomeCents),
+      spending: d(cashflow.spendingCents),
+      spending_by_category: spendNow.map((c) => ({ category: c.name, spent: d(c.totalCents) })),
     },
     last_month_spending_by_category: spendPrev.map((c) => ({
       category: c.name,
-      spent: d(c.total),
+      spent: d(c.totalCents),
     })),
     budgets: budgets.map((b) => ({
       category: b.category.name,
-      limit: d(b.limit),
-      spent_this_month: d(b.spent),
+      limit: d(b.limitCents),
+      spent_this_month: d(b.spentCents),
       in_my_budget: categoryInBudget(b.category),
     })),
     accounts: accounts.map((a) => ({
@@ -163,25 +168,25 @@ async function buildContext(user: AuthedUser): Promise<string> {
       bank: text(a.item.institutionName, 60),
       type: a.type,
       subtype: a.subtype,
-      balance: d(a.currentBalance ?? 0),
+      balance: d(a.currentBalanceCents ?? 0),
     })),
     goals: goals.map((g) => ({
       name: text(g.name, 60),
-      target: d(g.targetAmount),
-      saved: d(g.currentAmount),
+      target: d(g.targetAmountCents),
+      saved: d(g.currentAmountCents),
       deadline: g.targetDate ? day(g.targetDate) : null,
     })),
     rental_properties: properties.map((p) => ({
       name: text(p.name, 60),
-      rent_income: d(p.rentIncome),
-      mortgage: d(p.mortgage),
-      utilities: d(p.utilities),
-      hoa: d(p.hoa),
+      rent_income: d(p.rentIncomeCents),
+      mortgage: d(p.mortgageCents),
+      utilities: d(p.utilitiesCents),
+      hoa: d(p.hoaCents),
       monthly_net: d(
-        subtractMoney(p.rentIncome, p.mortgage + p.utilities + p.hoa),
+        p.rentIncomeCents - p.mortgageCents - p.utilitiesCents - p.hoaCents,
       ),
-      sweat_equity_put_in: d(p.sweatIn),
-      sweat_equity_gotten_out: d(p.sweatOut),
+      sweat_equity_put_in: d(p.sweatInCents),
+      sweat_equity_gotten_out: d(p.sweatOutCents),
     })),
     investment_holdings: holdings.map((h) => ({
       account: text(h.account.name, 60),
@@ -189,25 +194,25 @@ async function buildContext(user: AuthedUser): Promise<string> {
       name: text(h.name, 60),
       kind: h.kind,
       quantity: h.quantity,
-      value: d(h.value),
+      value: d(h.valueCents),
     })),
     recurring_bills_and_subscriptions: recurring.map((r) => ({
       merchant: text(r.merchant),
       cadence: r.cadence,
-      typical_amount: d(r.amount),
-      monthly_cost: d(r.monthlyCost),
+      typical_amount: d(r.amountCents),
+      monthly_cost: d(r.monthlyCostCents),
       next_expected: r.nextExpected.slice(0, 10),
     })),
     money_owed_back_to_user: reimbursements.outstanding.map((t) => ({
       merchant: text(t.name),
       date: day(t.date),
-      amount: d(t.amount),
-      already_repaid: d(t.reimbursed),
+      amount: d(t.amountCents),
+      already_repaid: d(t.reimbursedCents),
     })),
     recent_transactions: recent.map((t) => ({
       date: day(t.date),
       merchant: text(t.merchantName || t.name),
-      amount: d(t.amount),
+      amount: d(t.amountCents),
       category: t.category?.name ?? "Uncategorized",
       owed_back: t.owedBack || undefined,
     })),

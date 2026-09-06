@@ -2,6 +2,7 @@ import { route, safeJson } from "@/lib/security/api";
 import { prisma } from "@/lib/prisma";
 import { requireOwned } from "@/lib/security/ownership";
 import { budgetUpdate } from "@/lib/validation";
+import { dollarsToCents, serializeMoneyFields } from "@/lib/money";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,13 +14,13 @@ export const PATCH = route(
     await requireOwned("budget", id, ctx.user.id, { select: { id: true } });
     await prisma.budget.updateMany({
       where: { id, userId: ctx.user.id },
-      data: { amount: ctx.body.amount },
+      data: { amountCents: dollarsToCents(ctx.body.amount) },
     });
     const budget = await prisma.budget.findFirst({
       where: { id, userId: ctx.user.id },
-      select: { id: true, amount: true, categoryId: true },
+      select: { id: true, amountCents: true, categoryId: true },
     });
-    return safeJson(budget);
+    return safeJson(budget ? serializeMoneyFields(budget) : null);
   },
 );
 

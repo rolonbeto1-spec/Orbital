@@ -1,20 +1,22 @@
 import "server-only";
 import { prisma } from "@/lib/prisma";
-import { sumBy, effectiveSpend, subtractMoney, addMoney, roundMoney } from "@/lib/money";
+import {
+  sumCentsBy,
+  effectiveSpendCents,
+  asCents,
+} from "@/lib/money";
 import { monthRangeInZone, currentMonthRange as zonedCurrentMonth, partsInZone } from "@/lib/time";
 
 /**
- * Financial aggregation queries — every one scoped to a single tenant.
+ * Financial aggregation queries — every one scoped to a single tenant, and
+ * every figure in exact integer cents (§2, §49, §50).
  *
- * Three things changed from the single-user versions:
- *  1. every function takes a userId and every query filters on it (§2);
- *  2. sums go through src/lib/money.ts so thousands of additions do not
- *     accumulate float error (§49);
- *  3. periods are computed in the user's timezone, not the server's (§50).
+ * Everything returned by this module is `*Cents`. The conversion to dollars
+ * happens once, at the HTTP boundary, in the route handlers. Nothing here
+ * touches a float.
  *
- * Queries are also bounded. `getCashflow` and friends read a month at a time
- * rather than a whole history, so no single request can pull an unbounded
- * number of rows into memory (§51).
+ * Queries are also bounded: a month at a time, capped at MAX_ROWS, so no
+ * single request can pull an unbounded number of rows into memory (§51).
  */
 
 /** Account types treated as liabilities for net-worth math. */
@@ -29,74 +31,89 @@ export const PERSONAL = { account: { isBusiness: false } } as const;
 /** A hard ceiling on rows any single aggregation will read (§51). */
 const MAX_ROWS = 5000;
 
-export async function getNetWorth(userId: string) {
+export interface NetWorth {
+  assetsCents: number;
+  liabilitiesCents: number;
+  netWorthCents: number;
+  trueAvailableCents: number;
+  cashCents: number;
+  cardDebtCents: number;
+}
+
+export async function getNetWorth(userId: string): Promise<NetWorth> {
   const accounts = await prisma.account.findMany({
     where: { userId },
-    select: { type: true, currentBalance: true, availableBalance: true },
+    select: { type: true, currentBalanceCents: true, availableBalanceCents: true },
   });
 
-  let assets = 0;
-  let liabilities = 0;
+  let assetsCents = 0;
+  let liabilitiesCents = 0;
   // "True available": spendable cash minus card balances not yet paid — the
   // number that is not inflated by an un-hit statement.
-  let cash = 0;
-  let cardDebt = 0;
+  let cashCents = 0;
+  let cardDebtCents = 0;
 
   for (const account of accounts) {
-    if (LIABILITY_TYPES.has(account.type)) {
-      liabilities = addMoney(liabilities, account.currentBalance);
-    } else {
-      assets = addMoney(assets, account.currentBalance);
-    }
+    const balance = asCents(account.currentBalanceCents);
+    if (LIABILITY_TYPES.has(account.type)) liabilitiesCents += balance;
+    else assetsCents += balance;
+
     if (account.type === "depository") {
-      cash = addMoney(cash, account.availableBalance ?? account.currentBalance);
+      cashCents += asCents(account.availableBalanceCents ?? account.currentBalanceCents);
     }
-    if (account.type === "credit") {
-      cardDebt = addMoney(cardDebt, account.currentBalance);
-    }
+    if (account.type === "credit") cardDebtCents += balance;
   }
 
   return {
-    assets,
-    liabilities,
-    netWorth: subtractMoney(assets, liabilities),
-    trueAvailable: subtractMoney(cash, cardDebt),
-    cash,
-    cardDebt,
+    assetsCents,
+    liabilitiesCents,
+    netWorthCents: assetsCents - liabilitiesCents,
+    trueAvailableCents: cashCents - cardDebtCents,
+    cashCents,
+    cardDebtCents,
   };
 }
 
+export interface Cashflow {
+  spendingCents: number;
+  incomeCents: number;
+  netCents: number;
+}
+
 /** Spending and income for a range, for one user. */
-export async function getCashflow(userId: string, start: Date, end: Date) {
+export async function getCashflow(
+  userId: string,
+  start: Date,
+  end: Date,
+): Promise<Cashflow> {
   const transactions = await prisma.transaction.findMany({
     where: { userId, date: { gte: start, lt: end }, ...PERSONAL },
     select: {
-      amount: true,
+      amountCents: true,
       owedBack: true,
-      reimbursedAmount: true,
+      reimbursedAmountCents: true,
       category: { select: { group: true } },
     },
     take: MAX_ROWS,
   });
 
-  let spending = 0;
-  let income = 0;
+  let spendingCents = 0;
+  let incomeCents = 0;
 
   for (const transaction of transactions) {
     const group = transaction.category?.group ?? "expense";
-    if (group === "expense" && transaction.amount > 0) {
+    if (group === "expense" && transaction.amountCents > 0) {
       // A reimbursed purchase counts only for what it actually cost.
-      const spent = transaction.owedBack
-        ? effectiveSpend(transaction.amount, transaction.reimbursedAmount)
-        : transaction.amount;
-      spending = addMoney(spending, spent);
+      spendingCents += transaction.owedBack
+        ? effectiveSpendCents(transaction.amountCents, transaction.reimbursedAmountCents)
+        : transaction.amountCents;
     }
-    if (group === "income" && transaction.amount < 0) {
-      income = addMoney(income, -transaction.amount);
+    if (group === "income" && transaction.amountCents < 0) {
+      incomeCents += -transaction.amountCents;
     }
   }
 
-  return { spending, income, net: subtractMoney(income, spending) };
+  return { spendingCents, incomeCents, netCents: incomeCents - spendingCents };
 }
 
 export interface CategorySpend {
@@ -104,7 +121,7 @@ export interface CategorySpend {
   name: string;
   color: string;
   icon: string;
-  total: number;
+  totalCents: number;
 }
 
 /** Spending grouped by category for a range (expense group, money out). */
@@ -114,31 +131,30 @@ export async function getSpendingByCategory(
   end: Date,
 ): Promise<CategorySpend[]> {
   const transactions = await prisma.transaction.findMany({
-    where: { userId, date: { gte: start, lt: end }, amount: { gt: 0 }, ...PERSONAL },
+    where: { userId, date: { gte: start, lt: end }, amountCents: { gt: 0 }, ...PERSONAL },
     select: {
-      amount: true,
+      amountCents: true,
       owedBack: true,
-      reimbursedAmount: true,
+      reimbursedAmountCents: true,
       category: { select: { id: true, name: true, color: true, icon: true, group: true } },
     },
     take: MAX_ROWS,
   });
 
-  // Accumulate in cents, convert once at the end.
-  const totals = new Map<string, { meta: Omit<CategorySpend, "total">; cents: number }>();
+  const totals = new Map<string, { meta: Omit<CategorySpend, "totalCents">; cents: number }>();
 
   for (const transaction of transactions) {
     const category = transaction.category;
     if (!category || category.group !== "expense") continue;
 
-    const spent = transaction.owedBack
-      ? effectiveSpend(transaction.amount, transaction.reimbursedAmount)
-      : transaction.amount;
-    if (spent <= 0) continue;
+    const spentCents = transaction.owedBack
+      ? effectiveSpendCents(transaction.amountCents, transaction.reimbursedAmountCents)
+      : transaction.amountCents;
+    if (spentCents <= 0) continue;
 
     const existing = totals.get(category.id);
     if (existing) {
-      existing.cents += Math.round(spent * 100);
+      existing.cents += spentCents;
     } else {
       totals.set(category.id, {
         meta: {
@@ -147,14 +163,14 @@ export async function getSpendingByCategory(
           color: category.color,
           icon: category.icon,
         },
-        cents: Math.round(spent * 100),
+        cents: spentCents,
       });
     }
   }
 
   return Array.from(totals.values())
-    .map(({ meta, cents }) => ({ ...meta, total: cents / 100 }))
-    .sort((a, b) => b.total - a.total);
+    .map(({ meta, cents }) => ({ ...meta, totalCents: cents }))
+    .sort((a, b) => b.totalCents - a.totalCents);
 }
 
 /**
@@ -164,11 +180,14 @@ export async function getSpendingByCategory(
 export async function getMonthlyTrend(userId: string, timeZone: string, months: number) {
   const now = new Date();
   const { year, month } = partsInZone(now, timeZone);
-  const out: { month: string; label: string; income: number; spending: number }[] = [];
+  const out: {
+    month: string;
+    label: string;
+    incomeCents: number;
+    spendingCents: number;
+  }[] = [];
 
   for (let back = months - 1; back >= 0; back--) {
-    // Walk back through calendar months without relying on Date arithmetic
-    // that would use the server's zone.
     let targetYear = year;
     let targetMonth = month - back;
     while (targetMonth <= 0) {
@@ -177,7 +196,7 @@ export async function getMonthlyTrend(userId: string, timeZone: string, months: 
     }
 
     const { start, end } = monthRangeInZone(timeZone, targetYear, targetMonth);
-    const { spending, income } = await getCashflow(userId, start, end);
+    const { spendingCents, incomeCents } = await getCashflow(userId, start, end);
 
     out.push({
       month: `${targetYear}-${String(targetMonth).padStart(2, "0")}`,
@@ -185,8 +204,8 @@ export async function getMonthlyTrend(userId: string, timeZone: string, months: 
         month: "short",
         timeZone: "UTC",
       }),
-      income,
-      spending,
+      incomeCents,
+      spendingCents,
     });
   }
   return out;
@@ -201,27 +220,31 @@ export async function getBudgetsWithSpend(userId: string, timeZone: string) {
       select: {
         id: true,
         categoryId: true,
-        amount: true,
-        category: { select: { id: true, name: true, icon: true, color: true, group: true, inBudget: true } },
+        amountCents: true,
+        category: {
+          select: { id: true, name: true, icon: true, color: true, group: true, inBudget: true },
+        },
       },
     }),
     getSpendingByCategory(userId, start, end),
   ]);
 
-  const spentByCategory = new Map(spendByCategory.map((s) => [s.categoryId, s.total]));
+  const spentByCategory = new Map(spendByCategory.map((s) => [s.categoryId, s.totalCents]));
 
   return budgets
     .map((budget) => ({
       id: budget.id,
       categoryId: budget.categoryId,
       category: budget.category,
-      limit: budget.amount,
-      spent: spentByCategory.get(budget.categoryId) ?? 0,
+      limitCents: budget.amountCents,
+      spentCents: spentByCategory.get(budget.categoryId) ?? 0,
     }))
     // Guard the divide: a zero limit would otherwise sort as NaN/Infinity.
     .sort((a, b) => {
-      const ratioA = a.limit > 0 ? a.spent / a.limit : a.spent > 0 ? Infinity : 0;
-      const ratioB = b.limit > 0 ? b.spent / b.limit : b.spent > 0 ? Infinity : 0;
+      const ratioA =
+        a.limitCents > 0 ? a.spentCents / a.limitCents : a.spentCents > 0 ? Infinity : 0;
+      const ratioB =
+        b.limitCents > 0 ? b.spentCents / b.limitCents : b.spentCents > 0 ? Infinity : 0;
       return ratioB - ratioA;
     });
 }
@@ -240,8 +263,8 @@ export async function getReimbursements(userId: string) {
       name: true,
       merchantName: true,
       date: true,
-      amount: true,
-      reimbursedAmount: true,
+      amountCents: true,
+      reimbursedAmountCents: true,
       category: { select: { id: true, name: true, icon: true, color: true } },
     },
     orderBy: { date: "desc" },
@@ -252,17 +275,20 @@ export async function getReimbursements(userId: string) {
     id: transaction.id,
     name: transaction.merchantName || transaction.name,
     date: transaction.date,
-    amount: transaction.amount,
-    reimbursed: transaction.reimbursedAmount,
-    outstanding: effectiveSpend(transaction.amount, transaction.reimbursedAmount),
+    amountCents: transaction.amountCents,
+    reimbursedCents: transaction.reimbursedAmountCents,
+    outstandingCents: effectiveSpendCents(
+      transaction.amountCents,
+      transaction.reimbursedAmountCents,
+    ),
     category: transaction.category,
   }));
 
-  const totalOwed = sumBy(items, (item) => item.outstanding);
+  const totalOwedCents = sumCentsBy(items, (item) => item.outstandingCents);
 
   const recentIncome = await prisma.transaction.findMany({
-    where: { userId, amount: { lt: 0 } },
-    select: { id: true, name: true, merchantName: true, date: true, amount: true },
+    where: { userId, amountCents: { lt: 0 } },
+    select: { id: true, name: true, merchantName: true, date: true, amountCents: true },
     orderBy: { date: "desc" },
     take: 40,
   });
@@ -277,13 +303,13 @@ export async function getReimbursements(userId: string) {
       id: transaction.id,
       name: transaction.merchantName || transaction.name,
       date: transaction.date,
-      amount: roundMoney(-transaction.amount), // shown as positive money-in
+      amountCents: -transaction.amountCents, // shown as positive money-in
     }));
 
   return {
-    totalOwed,
+    totalOwedCents,
     items,
-    outstanding: items.filter((item) => item.outstanding > 0),
+    outstanding: items.filter((item) => item.outstandingCents > 0),
     possibleRepayments,
   };
 }

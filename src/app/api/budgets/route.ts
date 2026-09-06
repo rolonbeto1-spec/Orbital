@@ -2,6 +2,7 @@ import { route, safeJson } from "@/lib/security/api";
 import { prisma } from "@/lib/prisma";
 import { assertOwned } from "@/lib/security/ownership";
 import { budgetCreate } from "@/lib/validation";
+import { dollarsToCents, serializeMoneyFields } from "@/lib/money";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,11 +11,11 @@ export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
   const budgets = await prisma.budget.findMany({
     where: { userId: ctx.user.id },
     select: {
-      id: true, amount: true, categoryId: true,
+      id: true, amountCents: true, categoryId: true,
       category: { select: { id: true, name: true, icon: true, color: true, group: true } },
     },
   });
-  return safeJson({ budgets });
+  return safeJson({ budgets: budgets.map((b) => serializeMoneyFields(b)) });
 });
 
 /**
@@ -36,11 +37,12 @@ export const POST = route(
       create: {
         userId: ctx.user.id,
         categoryId: ctx.body.categoryId,
-        amount: ctx.body.amount,
+        // The request carries dollars; stored as exact cents.
+        amountCents: dollarsToCents(ctx.body.amount),
       },
-      update: { amount: ctx.body.amount },
-      select: { id: true, amount: true, categoryId: true },
+      update: { amountCents: dollarsToCents(ctx.body.amount) },
+      select: { id: true, amountCents: true, categoryId: true },
     });
-    return safeJson(budget);
+    return safeJson(serializeMoneyFields(budget));
   },
 );

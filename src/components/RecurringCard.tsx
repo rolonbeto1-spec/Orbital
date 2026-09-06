@@ -5,7 +5,7 @@ import { CategoryIcon } from "@/components/CategoryIcon";
 import { Card } from "@/components/Section";
 import { useApi } from "@/lib/client";
 import { formatCurrency } from "@/lib/format";
-import type { RecurringCharge } from "@/lib/recurring";
+import type { RecurringChargeWire as RecurringCharge } from "@/lib/types";
 
 const CADENCE_LABEL: Record<string, string> = {
   weekly: "weekly",
