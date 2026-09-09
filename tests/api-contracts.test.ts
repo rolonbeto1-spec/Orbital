@@ -119,6 +119,50 @@ describe("Endpoints return what their screens read", () => {
   }
 });
 
+describe("Endpoints accept what their screens send", () => {
+  // The mirror of the suite above, and the same failure mode in reverse: the
+  // Ask screen posted `{ question, history }` while the schema was `.strict()`
+  // and named the field `message`, so every question the UI asked came back
+  // 400 while the endpoint worked perfectly when called by hand.
+  //
+  // Each payload below is copied from the call the component actually makes.
+  it("the Ask screen's payload validates", async () => {
+    const { assistantRequest } = await import("@/lib/validation");
+    const sent = {
+      question: "how much did I spend this month?",
+      history: [
+        { role: "user", text: "hello" },
+        { role: "bot", text: "hi" },
+      ],
+    };
+    expect(assistantRequest.safeParse(sent).success).toBe(true);
+  });
+
+  it("the Budgets screen's reminder payload validates", async () => {
+    const { alertPrefsUpdate } = await import("@/lib/validation");
+    // RemindersCard posts the whole object back, not a delta.
+    expect(alertPrefsUpdate.safeParse({ half: true, full: false, weekly: true }).success).toBe(true);
+  });
+
+  it("history stays bounded, because it is untrusted text that costs money", async () => {
+    const { assistantRequest } = await import("@/lib/validation");
+    const tooMany = {
+      question: "hi",
+      history: Array.from({ length: 40 }, () => ({ role: "user" as const, text: "x" })),
+    };
+    expect(assistantRequest.safeParse(tooMany).success).toBe(false);
+
+    const tooLong = {
+      question: "hi",
+      history: [{ role: "user" as const, text: "x".repeat(5000) }],
+    };
+    expect(assistantRequest.safeParse(tooLong).success).toBe(false);
+
+    const badRole = { question: "hi", history: [{ role: "system", text: "x" }] };
+    expect(assistantRequest.safeParse(badRole).success).toBe(false);
+  });
+});
+
 describe("No endpoint hands the browser raw cents", () => {
   // `serializeMoneyFields` renames `amountCents` to `amount` and divides by
   // 100. A response still carrying a `*Cents` key means a screen somewhere is

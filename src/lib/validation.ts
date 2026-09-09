@@ -181,9 +181,32 @@ export const accountUpdate = z.object({ isBusiness: z.boolean() }).strict();
 export const categoryUpdate = z.object({ inBudget: z.boolean().nullable() }).strict();
 
 /** AI chat input. Length-bounded so one request cannot buy a large bill (§33). */
+/**
+ * A question for the Ask screen, plus the last few turns for context.
+ *
+ * The field is `question` because that is what the screen sends. It used to be
+ * `message`, and since the schema is `.strict()` every question the UI asked
+ * came back 400 — the assistant was unreachable from the application, while
+ * working perfectly when called with the right field name.
+ *
+ * `history` is bounded on every axis: how many turns, how long each one is,
+ * and what a role may be. It is the user's own prior text and it goes into an
+ * AI prompt, so it is untrusted input that also costs money.
+ */
 export const assistantRequest = z
   .object({
-    message: z.string().trim().min(1, "Say something").max(2000, "Message is too long"),
+    question: z.string().trim().min(1, "Say something").max(2000, "Message is too long"),
+    history: z
+      .array(
+        z
+          .object({
+            role: z.enum(["user", "bot"]),
+            text: z.string().max(2000),
+          })
+          .strict(),
+      )
+      .max(8)
+      .optional(),
   })
   .strict();
 

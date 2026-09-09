@@ -42,7 +42,7 @@ export const GET = route({ auth: "user", limits: ["read"] }, async () => {
 export const POST = route(
   { auth: "user", limits: ["ai", "aiSustained"], body: assistantRequest },
   async (ctx) => {
-    const question = ctx.body.message;
+    const question = ctx.body.question;
 
     // Layer 1 — deterministic, free, and fully authorized server-side.
     try {
@@ -55,7 +55,10 @@ export const POST = route(
     // Layer 2 — the model.
     if (llmConfigured()) {
       try {
-        const answer = await askLLM(ctx.user, question);
+        // Prior turns let a follow-up like "and last week?" resolve. They
+        // were accepted by the client and then dropped here, so every question
+        // was answered without context.
+        const answer = await askLLM(ctx.user, question, ctx.body.history ?? []);
         return safeJson({ ...answer, source: "ai" });
       } catch (error) {
         if (error instanceof AiBudgetExceeded) {
