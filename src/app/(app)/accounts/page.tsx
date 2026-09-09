@@ -6,6 +6,7 @@ import { ChevronLeft, Building2, Trash2, Briefcase } from "lucide-react";
 import { AccountRow } from "@/components/AccountRow";
 import { ConnectBank } from "@/components/ConnectBank";
 import { useApi, apiDelete, apiPatch } from "@/lib/client";
+import { authClient } from "@/lib/auth-client";
 import { formatCurrency } from "@/lib/format";
 import type { Account, NetWorth } from "@/lib/types";
 
@@ -109,19 +110,35 @@ export default function AccountsPage() {
   );
 }
 
-// Shown only when the login gate is on (deployed with APP_PASSWORD).
+/**
+ * Sign out.
+ *
+ * This was left over from the shared-`APP_PASSWORD` era: it asked
+ * `/api/auth` whether a login gate was on and posted to `/api/auth/logout`.
+ * Neither route exists any more, so the request 404'd, the component returned
+ * null, and the application had no way to sign out at all — on any screen.
+ *
+ * It now goes through Better Auth, which revokes the session server-side
+ * rather than only dropping the cookie, so the session cannot be replayed.
+ */
 function SignOut() {
-  const { data } = useApi<{ enabled: boolean }>("/api/auth");
-  if (!data?.enabled) return null;
+  const [busy, setBusy] = useState(false);
   return (
     <button
+      disabled={busy}
       onClick={async () => {
-        await fetch("/api/auth/logout", { method: "POST" });
-        window.location.href = "/login";
+        setBusy(true);
+        try {
+          await authClient.signOut();
+        } finally {
+          // Full navigation, not a client transition: it drops every cached
+          // page of the signed-in app from memory.
+          window.location.href = "/login";
+        }
       }}
-      className="mx-auto mb-2 text-xs font-semibold text-text-faint underline"
+      className="mx-auto mb-2 text-xs font-semibold text-text-faint underline disabled:opacity-50"
     >
-      Sign out on this device
+      {busy ? "Signing out…" : "Sign out on this device"}
     </button>
   );
 }

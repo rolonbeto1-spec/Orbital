@@ -54,7 +54,21 @@ export function AuthForm({
         {description ? <p className="text-sm text-muted">{description}</p> : null}
       </header>
 
-      <form onSubmit={handleSubmit} className="space-y-4" noValidate>
+      {/*
+        `method="post"` matters even though this form is always submitted by
+        the handler above.
+
+        A form with no method defaults to GET. If the page's JavaScript has not
+        loaded or has failed — a slow network, a chunk 404, a strict extension
+        — the browser falls back to submitting natively, and a GET puts every
+        field in the query string. That means the password lands in the address
+        bar, in browser history, in the server's access log, and in the
+        `Referer` header of the next request. It was reproducible here.
+
+        POST keeps the fields in a request body, so the fallback is merely
+        broken rather than a credential leak.
+      */}
+      <form onSubmit={handleSubmit} method="post" className="space-y-4" noValidate>
         {children}
 
         {error ? (

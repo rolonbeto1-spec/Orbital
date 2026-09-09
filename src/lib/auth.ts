@@ -79,7 +79,24 @@ export const auth = betterAuth({
     additionalFields: {
       role: { type: "string", defaultValue: "USER", input: false },
       timezone: { type: "string", defaultValue: "UTC", input: false },
-      plaidUserRef: { type: "string", required: true, input: false },
+      /**
+       * Minted here, by a function, on every create.
+       *
+       * `required: true` with `input: false` and no default is unsatisfiable:
+       * Better Auth validates the create payload BEFORE the databaseHook that
+       * was filling this in, and the client is forbidden from supplying it,
+       * so every registration failed with "plaidUserRef is required". Account
+       * creation was impossible.
+       *
+       * A function default runs per user, so two accounts never share a
+       * reference — which matters, because this is the identifier Plaid sees.
+       */
+      plaidUserRef: {
+        type: "string",
+        required: true,
+        input: false,
+        defaultValue: () => newPlaidUserRef(),
+      },
       termsAcceptedAt: { type: "date", required: false, input: false },
       privacyAcceptedAt: { type: "date", required: false, input: false },
       bankConsentAt: { type: "date", required: false, input: false },

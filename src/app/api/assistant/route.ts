@@ -25,6 +25,20 @@ export const maxDuration = 60;
  * The response is plain text. It is rendered as text by the client, never as
  * HTML — model output is untrusted data (§16).
  */
+/**
+ * Whether the AI layer is configured, so the Ask screen can say which engine
+ * is answering rather than guessing.
+ *
+ * The screen has always asked for this; the route only accepted POST, so the
+ * request came back 405 on every visit and the badge silently fell back to
+ * its "no AI" state. The answer is a single boolean about server
+ * configuration and contains no user data — but it is still behind `auth`,
+ * because configuration detail is not something to hand to anonymous callers.
+ */
+export const GET = route({ auth: "user", limits: ["read"] }, async () => {
+  return safeJson({ llm: llmConfigured() });
+});
+
 export const POST = route(
   { auth: "user", limits: ["ai", "aiSustained"], body: assistantRequest },
   async (ctx) => {

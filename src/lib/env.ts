@@ -84,6 +84,17 @@ const schema = z.object({
    * the redirect; we only ever send one of these (§8, §19).
    */
   PLAID_REDIRECT_URIS: z.string().optional(),
+  /**
+   * Point the Plaid client at a different host. DEVELOPMENT ONLY.
+   *
+   * Exists so the Link -> exchange -> sync path can be exercised end to end
+   * against a local stand-in, on a machine with no route to Plaid. It is read
+   * in src/lib/plaid.ts only when NODE_ENV is not "production", so setting it
+   * in a production environment does nothing: a variable that could redirect
+   * bank credentials to another host must not be one deployment config can
+   * turn on. tests/plaid-base-url.test.ts holds that line.
+   */
+  PLAID_API_BASE_URL: z.string().url().optional(),
 
   // --- AI ---
   ANTHROPIC_API_KEY: z.string().optional(),

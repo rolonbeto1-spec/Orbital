@@ -17,10 +17,25 @@ import { env, plaidRedirectAllowlist } from "@/lib/env";
 
 export const plaidConfigured = Boolean(env.PLAID_CLIENT_ID && env.PLAID_SECRET);
 
+/**
+ * Where Plaid lives.
+ *
+ * Always the real Plaid host in production. The override is honoured only
+ * outside production, so that the link/exchange/sync path can be driven
+ * against a local stand-in during development; a variable able to redirect
+ * bank credentials elsewhere must never be something a production
+ * environment can switch on.
+ */
+function plaidBasePath(): string {
+  const override = env.PLAID_API_BASE_URL;
+  if (override && process.env.NODE_ENV !== "production") return override;
+  return PlaidEnvironments[env.PLAID_ENV];
+}
+
 export const plaidClient: PlaidApi | null = plaidConfigured
   ? new PlaidApi(
       new Configuration({
-        basePath: PlaidEnvironments[env.PLAID_ENV],
+        basePath: plaidBasePath(),
         baseOptions: {
           headers: {
             "PLAID-CLIENT-ID": env.PLAID_CLIENT_ID,

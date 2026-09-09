@@ -367,6 +367,12 @@ function WindowPicker({
         onClick={onClose}
       />
       <div
+        // `inert` when closed. The sheet stays mounted so it can slide, and a
+        // transform moves it off-screen — but a transform does not take an
+        // element out of the tab order, so a keyboard user could tab into an
+        // invisible dialog and change the date range without seeing it.
+        inert={!open}
+        aria-hidden={!open}
         className={`fixed inset-x-0 bottom-0 z-50 mx-auto max-h-[70dvh] w-full max-w-[480px] overflow-y-auto rounded-t-3xl border-t border-border bg-surface p-5 pb-8 shadow-lg transition-transform duration-[380ms] ${open ? "translate-y-0" : "translate-y-full"}`}
         style={{ transitionTimingFunction: "cubic-bezier(.32,.72,.24,1)" }}
       >

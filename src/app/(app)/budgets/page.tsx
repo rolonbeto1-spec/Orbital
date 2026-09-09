@@ -20,10 +20,20 @@ interface WantItem {
   inBudget: boolean;
 }
 type FixedItem = WantItem;
+
+/**
+ * The shape /api/budget-overview actually returns.
+ *
+ * This page previously declared `{ fixed, wants }`, a shape from before the
+ * budget model was rebuilt. `useApi<T>` only asserts the type, so nothing
+ * caught the mismatch: `data.wants` was undefined at runtime and the page
+ * crashed to a blank screen on every visit.
+ */
 interface Overview {
   month: string;
-  fixed: { total: number; items: FixedItem[] };
-  wants: { budget: number; spent: number; hasBudget: boolean; items: WantItem[] };
+  inBudget: WantItem[];
+  outOfBudget: FixedItem[];
+  totals: { limit: number; spent: number; committed: number };
 }
 
 export default function BudgetsPage() {
@@ -40,10 +50,11 @@ export default function BudgetsPage() {
   }
   if (!data) return null;
 
-  const { wants, fixed } = data;
-  const remaining = wants.budget - wants.spent;
+  const { inBudget: wantItems, outOfBudget: fixedItems, totals } = data;
+  const hasBudget = totals.limit > 0;
+  const remaining = totals.limit - totals.spent;
   const over = remaining < 0;
-  const pct = wants.budget > 0 ? Math.min((wants.spent / wants.budget) * 100, 100) : 0;
+  const pct = totals.limit > 0 ? Math.min((totals.spent / totals.limit) * 100, 100) : 0;
 
   return (
     <div>
@@ -57,12 +68,12 @@ export default function BudgetsPage() {
             What you control
           </span>
         </div>
-        {wants.hasBudget ? (
+        {hasBudget ? (
           <>
             <p className="mt-1 text-3xl font-bold tabular-nums">
-              {formatCurrency(wants.spent)}{" "}
+              {formatCurrency(totals.spent)}{" "}
               <span className="text-lg font-semibold text-text-faint">
-                / {formatCurrency(wants.budget)}
+                / {formatCurrency(totals.limit)}
               </span>
             </p>
             <div className="mt-3 h-2.5 w-full overflow-hidden rounded-full bg-surface-2">
@@ -103,7 +114,7 @@ export default function BudgetsPage() {
           In your budget · tap to set a limit
         </h2>
         <Card>
-          {wants.items.map((it, i) => {
+          {wantItems.map((it, i) => {
             const p = it.limit > 0 ? Math.min((it.spent / it.limit) * 100, 100) : 0;
             const itemOver = it.limit > 0 && it.spent > it.limit;
             return (
@@ -159,14 +170,14 @@ export default function BudgetsPage() {
         <div className="mb-2 flex items-center gap-1.5 px-5">
           <Lock size={13} className="text-text-faint" />
           <h2 className="text-sm font-semibold uppercase tracking-wide text-text-muted">
-            Fixed costs · {formatCurrency(fixed.total)}
+            Fixed costs · {formatCurrency(totals.committed)}
           </h2>
         </div>
         <Card>
-          {fixed.items.length === 0 ? (
+          {fixedItems.length === 0 ? (
             <p className="px-5 py-4 text-sm text-text-faint">No fixed costs yet this month.</p>
           ) : (
-            fixed.items.map((it, i) => (
+            fixedItems.map((it, i) => (
               <div key={it.name}>
                 {i > 0 && <div className="mx-5 border-t border-border" />}
                 <button
