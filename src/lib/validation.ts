@@ -230,13 +230,23 @@ export const hiveLayoutUpdate = z
   })
   .strict();
 
+/**
+ * Budget reminder toggles.
+ *
+ * These are the three flags `AlertPrefs` actually stores and the Budgets
+ * screen actually sends. The previous schema described a different, older
+ * feature — `bigPurchase`, `lowBalance`, thresholds — and being `.strict()`
+ * it rejected every request the UI made. Saving a reminder preference
+ * returned 400 and the toggle silently snapped back.
+ *
+ * `half` and `full` are separate because the screen presents them as separate
+ * choices; the route used to map both from one field, so turning off one
+ * turned off the other.
+ */
 export const alertPrefsUpdate = z
   .object({
-    bigPurchase: z.boolean().optional(),
-    bigPurchaseThreshold: positiveMoney.max(100_000).optional(),
-    lowBalance: z.boolean().optional(),
-    lowBalanceThreshold: positiveMoney.max(100_000).optional(),
-    weeklyDigest: z.boolean().optional(),
-    budgetOverrun: z.boolean().optional(),
+    half: z.boolean().optional(),
+    full: z.boolean().optional(),
+    weekly: z.boolean().optional(),
   })
   .strict();

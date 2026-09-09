@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { consumeRateLimit, clientIp } from "@/lib/security/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,7 +13,22 @@ export const dynamic = "force-dynamic";
  * configuration, no counts — a health endpoint is unauthenticated, and an
  * attacker should learn nothing from it about how the system is built (§40).
  */
-export async function GET(): Promise<Response> {
+export async function GET(request: Request): Promise<Response> {
+  // Metered per IP before the database is touched. This endpoint is
+  // unauthenticated and its whole job is to make a database round trip, so
+  // leaving it unmetered hands anyone a cheap way to exhaust the connection
+  // pool. A refused call returns without querying anything.
+  const limit = await consumeRateLimit("health", `ip:${clientIp(request)}`);
+  if (!limit.ok) {
+    return new NextResponse(null, {
+      status: 429,
+      headers: {
+        "Retry-After": String(limit.retryAfter),
+        "Cache-Control": "no-store",
+      },
+    });
+  }
+
   let database = false;
   try {
     // The cheapest possible round trip that proves the connection works.

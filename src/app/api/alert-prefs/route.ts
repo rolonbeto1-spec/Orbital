@@ -16,11 +16,9 @@ export const GET = route({ auth: "user", limits: ["read"] }, async (ctx) => {
 export const POST = route(
   { auth: "user", limits: ["write"], body: alertPrefsUpdate },
   async (ctx) => {
-    const prefs = await setAlertPrefs(ctx.user.id, {
-      half: ctx.body.budgetOverrun,
-      full: ctx.body.budgetOverrun,
-      weekly: ctx.body.weeklyDigest,
-    });
+    // Passed through as sent: the three toggles are independent, and the
+    // schema already restricts the payload to exactly these keys.
+    const prefs = await setAlertPrefs(ctx.user.id, ctx.body);
     return safeJson(prefs);
   },
 );

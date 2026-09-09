@@ -59,6 +59,14 @@ export const RATE_LIMITS = {
   // --- Unauthenticated surface ---
   webhook: { windowSeconds: 60, max: 600 },
   anonymous: { windowSeconds: 60, max: 30 },
+  /**
+   * Liveness checks. Generous, because uptime monitors and platform health
+   * probes are supposed to call this often and must never be throttled — but
+   * not unlimited, because the endpoint is unauthenticated and every call
+   * costs a database round trip, which makes an unmetered one a cheap way to
+   * exhaust the connection pool.
+   */
+  health: { windowSeconds: 60, max: 120 },
 } as const satisfies Record<string, RateLimitRule>;
 
 export type RateLimitName = keyof typeof RATE_LIMITS;
