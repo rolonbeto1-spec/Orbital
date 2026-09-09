@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import { prisma, resetDatabase, createTenant, type TestUser } from "./fixtures";
 
@@ -249,7 +250,6 @@ describe("CSRF posture (§17)", () => {
       () => import("@/app/api/plaid/sync/route"),
       () => import("@/app/api/plaid/create-link-token/route"),
       () => import("@/app/api/plaid/exchange-public-token/route"),
-      () => import("@/app/api/assistant/route"),
       () => import("@/app/api/cancel-help/route"),
       () => import("@/app/api/account/consent/route"),
     ];
@@ -258,6 +258,75 @@ describe("CSRF posture (§17)", () => {
       const mod = (await load()) as Record<string, unknown>;
       expect(typeof mod.GET).not.toBe("function");
     }
+  });
+
+  it("allows the assistant's GET only because it reads nothing but configuration", async () => {
+    // The Ask screen asks whether the AI layer is configured. That is a GET on
+    // a route whose POST mutates, so it is called out here rather than left to
+    // the blanket rule above: the exemption has to be visible, and it has to
+    // stay true.
+    //
+    // What makes it safe is that the handler touches no user data and changes
+    // nothing — triggering it from an <img> tag accomplishes precisely
+    // nothing. If it ever grows a body or a write, this fails.
+    const source = fs.readFileSync("src/app/api/assistant/route.ts", "utf8");
+    const getBlock = source.slice(
+      source.indexOf("export const GET"),
+      source.indexOf("export const POST"),
+    );
+    expect(getBlock).toContain("llmConfigured()");
+    expect(getBlock).not.toMatch(/prisma\.|body:|create|update|delete/i);
+  });
+
+  it("refuses a state-changing request from another origin", async () => {
+    // Second line behind SameSite=Lax. The cookie already keeps a browser from
+    // attaching credentials to a cross-site POST, but Chrome's
+    // "Lax-allowing-unsafe" window and any future relaxation of SameSite would
+    // both leave nothing else standing.
+    const { POST } = await import("@/app/api/folders/route");
+    for (const origin of ["https://evil.example", "http://localhost:3001"]) {
+      const response = await POST(
+        request("POST", "/api/folders", { name: "csrf" }, { origin }),
+      );
+      expect(response.status, `origin ${origin}`).toBe(403);
+    }
+  });
+
+  it("refuses a state-changing request whose Referer is foreign", async () => {
+    const { POST } = await import("@/app/api/folders/route");
+    const response = await POST(
+      request("POST", "/api/folders", { name: "csrf" }, { referer: "https://evil.example/x" }),
+    );
+    expect(response.status).toBe(403);
+  });
+
+  it("allows the app's own origin, and leaves reads alone", async () => {
+    const { POST } = await import("@/app/api/folders/route");
+    const ours = await POST(
+      request("POST", "/api/folders", { name: `ok-${Date.now()}` }, { origin: "http://localhost:3000" }),
+    );
+    expect(ours.status).toBe(200);
+
+    // A GET changes nothing, and navigations legitimately carry no Origin.
+    const { GET } = await import("@/app/api/folders/route");
+    const read = await GET(request("GET", "/api/folders", undefined, { origin: "https://evil.example" }));
+    expect(read.status).toBe(200);
+  });
+
+  it("meters the unauthenticated health endpoint", async () => {
+    // It is anonymous and its whole job is a database round trip, so an
+    // unmetered one is a cheap way to exhaust the connection pool.
+    const { GET } = await import("@/app/api/health/route");
+    let limited = false;
+    for (let i = 0; i < 130; i++) {
+      const response = await GET(request("GET", "/api/health"));
+      if (response.status === 429) {
+        limited = true;
+        expect(response.headers.get("retry-after")).toBeTruthy();
+        break;
+      }
+    }
+    expect(limited, "health never returned 429").toBe(true);
   });
 
   it("keeps alert preferences behind POST rather than GET", async () => {

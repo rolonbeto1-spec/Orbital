@@ -13,7 +13,7 @@ import { NotFoundError } from "./ownership";
 import { consumeRateLimit, clientIp, type RateLimitName } from "./rate-limit";
 import { log, newCorrelationId, metric } from "./logger";
 import { recordAudit } from "./audit";
-import { assertProductionSecrets } from "@/lib/env";
+import { assertProductionSecrets, appOrigin } from "@/lib/env";
 
 /**
  * The one way to write an API route (§13).
@@ -85,6 +85,38 @@ export interface RouteOptions<TBody, TQuery> {
   audit?: string;
 }
 
+/** Methods that change nothing, and so need no origin check. */
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+/**
+ * Is this state-changing request coming from our own page?
+ *
+ * `Origin` is set by the browser on every fetch and on every cross-site form
+ * post, and it cannot be forged by page script — which is exactly what makes
+ * it usable here. `Referer` is the fallback for the few clients that omit
+ * Origin on same-origin requests.
+ *
+ * A request with neither header is allowed through: that is what a server-to
+ * -server caller looks like, and it is also what a browser CANNOT produce for
+ * a cross-site request, since browsers always set Origin on those. So this
+ * rejects the browser attack without breaking non-browser clients.
+ */
+function isSameOrigin(request: Request): boolean {
+  const expected = appOrigin();
+  const origin = request.headers.get("origin");
+  if (origin) return origin === expected;
+
+  const referer = request.headers.get("referer");
+  if (referer) {
+    try {
+      return new URL(referer).origin === expected;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
 type Handler<TBody, TQuery> = (
   ctx: RouteContext<TBody, TQuery>,
 ) => Promise<NextResponse | Response>;
@@ -116,6 +148,25 @@ export function route<TBody = undefined, TQuery = undefined>(
       // Memoised; throws on the first request of a misconfigured production
       // deployment rather than serving it (§28).
       assertProductionSecrets();
+
+      // ---- 0b. Same-origin check on state-changing requests -----------------
+      //
+      // The session cookie is SameSite=Lax, so a browser will not attach it to
+      // a cross-site POST, and a real CSRF attempt already comes back 401.
+      // This is the second line, and a financial app should have one:
+      //
+      //   * Chrome's "Lax-allowing-unsafe" intervention still lets a cross-site
+      //     top-level POST carry a Lax cookie for two minutes after it is set,
+      //     which is a real window right after sign-in;
+      //   * SameSite is one attribute. If it is ever relaxed — for an embed, an
+      //     OAuth return, a third-party integration — the only defense would
+      //     disappear silently, with nothing failing in tests.
+      //
+      // Safe methods are exempt: they change nothing, and GET navigations
+      // legitimately arrive with no Origin at all.
+      if (!SAFE_METHODS.has(method) && !isSameOrigin(request)) {
+        throw new ForbiddenError("Cross-origin request refused.");
+      }
 
       // ---- 1. Authenticate -------------------------------------------------
       let user: AuthedUser | null = null;

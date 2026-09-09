@@ -24,3 +24,28 @@ process.env.LOG_LEVEL = "error";
 process.env.ANTHROPIC_API_KEY = "sk-ant-test-key-never-used-for-a-real-request";
 // Deliberately absent: PLAID_*. The suite must pass with no Plaid credential,
 // and the code must degrade gracefully without one.
+//
+// The import below is load-bearing, and the order matters. Prisma's generated
+// client reads `.env` into `process.env` when it is first imported — so
+// deleting these keys before that happens accomplishes nothing, because the
+// first `import { prisma }` in any test puts them straight back. Importing it
+// here forces that to happen now; the deletion afterwards then sticks.
+//
+// Without this, a developer who has Plaid configured locally runs a different
+// suite from everyone else. It bit exactly that way: with a local Plaid
+// stand-in set in `.env`, the sync tests started marking Items as errored,
+// because the stand-in answered INVALID_ACCESS_TOKEN to the fixtures' fake
+// token — a failure that appeared on one machine and nowhere else.
+await import("../src/generated/prisma");
+
+for (const key of [
+  "PLAID_CLIENT_ID",
+  "PLAID_SECRET",
+  "PLAID_API_BASE_URL",
+  "PLAID_WEBHOOK_URL",
+  "PLAID_REDIRECT_URIS",
+]) {
+  delete process.env[key];
+}
+
+export {};
